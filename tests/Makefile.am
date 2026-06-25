@@ -87,7 +87,12 @@ endif
 dist_check_SCRIPTS += auth-username-pass auth-certificate auth-nonascii cert-fingerprint \
 	id-test obsolete-server-crypto pfs auth-swtpm auth-hwtpm fortinet-auth-and-config \
 	f5-auth-and-config juniper-auth juniper-sso-auth gp-auth-and-config auth-pkcs11 \
-	auth-multicert
+	auth-multicert gp-nlb-ssl-parse gp-nlb-esp-envelope gp-nlb-ssl-connect \
+	gp-nlb-opaque-due gp-nlb-auth-and-config gp-esp-gcm-roundtrip gp-nlb-blob-parse \
+	gp-nlb-opaque-auth
+
+TESTS += gp-nlb-ssl-parse gp-nlb-esp-envelope gp-nlb-ssl-connect gp-nlb-opaque-due \
+	gp-esp-gcm-roundtrip gp-nlb-blob-parse gp-nlb-opaque-auth
 
 if HAVE_CWRAP
 TESTS += auth-username-pass auth-certificate auth-nonascii cert-fingerprint id-test \
@@ -110,7 +115,8 @@ endif
 if HAVE_PYTHON36_FLASK
 TESTS += juniper-sso-auth auth-multicert
 if HAVE_PYTHON37_DATACLASSES
-TESTS += juniper-auth gp-auth-and-config f5-auth-and-config fortinet-auth-and-config
+TESTS += juniper-auth gp-auth-and-config f5-auth-and-config fortinet-auth-and-config \
+	gp-nlb-auth-and-config
 endif
 endif
 

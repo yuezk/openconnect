@@ -113,6 +113,12 @@ OPENCONNECT_5_7 {
 	openconnect_set_cookie;
 	openconnect_set_allow_insecure_crypto;
 	openconnect_get_auth_expiration;
+	openconnect_get_gp_session_lifetime;
+	openconnect_get_gp_user_expires;
+	openconnect_get_gp_lifetime_notify_prior;
+	openconnect_get_gp_lifetime_notify_message;
+	openconnect_get_gp_nlb_enabled;
+	openconnect_get_gp_nlb_connected_gw_ip;
 	openconnect_disable_dtls;
 	openconnect_get_connect_url;
 	openconnect_set_webview_callback;

@@ -1,0 +1,114 @@
+#!/bin/sh
+# Validate NLB envelope HMAC-SHA1 signing vectors
+set -eu
+cd "$(dirname "$0")/.."
+CC="${CC:-cc}"
+TMP=$(mktemp -d)
+trap 'rm -rf "$TMP"' EXIT
+
+CFLAGS="${CFLAGS:-}"
+LIBS="${LIBS:-}"
+if pkg-config --exists openssl 2>/dev/null; then
+	CFLAGS="$CFLAGS $(pkg-config --cflags openssl)"
+	LIBS="$LIBS $(pkg-config --libs openssl)"
+elif pkg-config --exists libssl 2>/dev/null; then
+	CFLAGS="$CFLAGS $(pkg-config --cflags libssl)"
+	LIBS="$LIBS $(pkg-config --libs libssl)"
+else
+	CFLAGS="$CFLAGS -I/usr/include -I/usr/local/include -I/opt/homebrew/include"
+	LIBS="$LIBS -lcrypto -lssl"
+fi
+
+cat > "$TMP/test.c" <<'EOF'
+#include <stdio.h>
+#include <stdint.h>
+#include <string.h>
+#include <arpa/inet.h>
+#include <openssl/hmac.h>
+#include <openssl/sha.h>
+
+#define GP_NLB_HDR_LEN 16
+#define GP_NLB_MAGIC 0x1a2b3c4d
+#define GP_NLB_HDR_AUTH_LEN 6
+#define GP_NLB_HDR_SIGN_LEN 10
+
+static inline void store_be32(void *p, uint32_t d)
+{
+	uint32_t n = htonl(d);
+	memcpy(p, &n, 4);
+}
+
+static inline void store_be16(void *p, uint16_t d)
+{
+	uint16_t n = htons(d);
+	memcpy(p, &n, 2);
+}
+
+static void write_hdr(unsigned char *hdr, uint16_t seq, uint16_t inner_len, uint8_t type)
+{
+	store_be32(hdr, GP_NLB_MAGIC);
+	store_be16(hdr + 4, seq);
+	store_be16(hdr + 6, inner_len);
+	hdr[8] = type;
+	hdr[9] = 0;
+	memset(hdr + 10, 0, GP_NLB_HDR_AUTH_LEN);
+}
+
+static int nlb_hmac_sha1(const unsigned char *key, int key_len,
+			 const unsigned char *hdr, int hdrlen,
+			 const unsigned char *esp, int esplen,
+			 unsigned char *out)
+{
+	unsigned char mac[SHA_DIGEST_LENGTH];
+	unsigned int maclen = sizeof(mac);
+	HMAC_CTX *ctx;
+
+	ctx = HMAC_CTX_new();
+	if (!ctx)
+		return -1;
+	if (!HMAC_Init_ex(ctx, key, key_len, EVP_sha1(), NULL) ||
+	    !HMAC_Update(ctx, hdr, hdrlen) ||
+	    (esplen > 0 && !HMAC_Update(ctx, esp, esplen)) ||
+	    !HMAC_Final(ctx, mac, &maclen)) {
+		HMAC_CTX_free(ctx);
+		return -1;
+	}
+	HMAC_CTX_free(ctx);
+	memcpy(out, mac, GP_NLB_HDR_AUTH_LEN);
+	return 0;
+}
+
+static int check_tag(const unsigned char *got, const unsigned char *expect)
+{
+	return memcmp(got, expect, GP_NLB_HDR_AUTH_LEN) == 0 ? 0 : 1;
+}
+
+int main(void)
+{
+	unsigned char key[16];
+	unsigned char hdr[GP_NLB_HDR_LEN];
+	unsigned char mac[GP_NLB_HDR_AUTH_LEN];
+	unsigned char esp[8] = { 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88 };
+	int i;
+
+	for (i = 0; i < (int)sizeof(key); i++)
+		key[i] = (unsigned char)(0xa0 + i);
+
+	write_hdr(hdr, 1, 8, 1);
+	if (nlb_hmac_sha1(key, sizeof(key), hdr, GP_NLB_HDR_SIGN_LEN, esp, sizeof(esp), mac) < 0)
+		return 1;
+	if (check_tag(mac, (unsigned char[]){ 0x92, 0x72, 0xfd, 0x6e, 0xa1, 0xd6 }))
+		return 1;
+
+	write_hdr(hdr, 2, 0, 0);
+	if (nlb_hmac_sha1(key, sizeof(key), hdr, GP_NLB_HDR_SIGN_LEN, NULL, 0, mac) < 0)
+		return 1;
+	if (check_tag(mac, (unsigned char[]){ 0x82, 0xb4, 0xd9, 0xc5, 0x67, 0xbf }))
+		return 1;
+
+	printf("gp-nlb-opaque-auth: OK\n");
+	return 0;
+}
+EOF
+$CC $CFLAGS -o "$TMP/test" "$TMP/test.c" $LIBS
+"$TMP/test"

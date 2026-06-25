@@ -838,6 +838,18 @@ void openconnect_vpninfo_free(struct openconnect_info *vpninfo)
 	free(vpninfo->dtls_cipher);
 	free(vpninfo->peer_cert_hash);
 	free(vpninfo->ciphersuite_config);
+	free(vpninfo->gp_lifetime_notify_message);
+	free(vpninfo->gp_nlb.enc_hs_key);
+	free(vpninfo->gp_nlb.tunnel_opaque);
+	free(vpninfo->gp_nlb.inner_gw_ip);
+	free(vpninfo->gp_nlb.tunnel_vip);
+	free(vpninfo->gp_nlb.connected_gw_ip);
+	free(vpninfo->gp_nlb.in_tunnel_gw_cert_chksum);
+	memset(vpninfo->gp_nlb.opaque_key, 0, sizeof(vpninfo->gp_nlb.opaque_key));
+	if (vpninfo->gp_nlb.opaque_blob) {
+		memset(vpninfo->gp_nlb.opaque_blob, 0, vpninfo->gp_nlb.opaque_blob_len);
+		free(vpninfo->gp_nlb.opaque_blob);
+	}
 #if defined(OPENCONNECT_OPENSSL)
 	free(vpninfo->cstp_cipher);
 #if defined(HAVE_BIO_METH_FREE)
@@ -896,6 +908,9 @@ void openconnect_vpninfo_free(struct openconnect_info *vpninfo)
 
 	free(vpninfo->localname);
 	free(vpninfo->useragent);
+	free(vpninfo->gp_app_version);
+	free(vpninfo->gp_os_version);
+	free(vpninfo->gp_host_id);
 	free(vpninfo->authgroup);
 #ifdef HAVE_LIBSTOKEN
 	if (vpninfo->stoken_pin)
@@ -1019,6 +1034,48 @@ int openconnect_set_useragent(struct openconnect_info *vpninfo,
 	return 0;
 }
 
+int openconnect_set_gp_app_version(struct openconnect_info *vpninfo,
+				   const char *gp_app_version)
+{
+	UTF8CHECK(gp_app_version);
+
+	STRDUP(vpninfo->gp_app_version, gp_app_version);
+	return 0;
+}
+
+const char *openconnect_get_gp_app_version(struct openconnect_info *vpninfo)
+{
+	return vpninfo->csd_ticket ?: (vpninfo->gp_app_version ?: "6.3.0-33");
+}
+
+int openconnect_set_gp_os_version(struct openconnect_info *vpninfo,
+				  const char *gp_os_version)
+{
+	UTF8CHECK(gp_os_version);
+
+	STRDUP(vpninfo->gp_os_version, gp_os_version);
+	return 0;
+}
+
+const char *openconnect_get_gp_os_version(struct openconnect_info *vpninfo)
+{
+	return vpninfo->gp_os_version ?: vpninfo->platname;
+}
+
+int openconnect_set_gp_host_id(struct openconnect_info *vpninfo,
+			       const char *gp_host_id)
+{
+	UTF8CHECK(gp_host_id);
+
+	STRDUP(vpninfo->gp_host_id, gp_host_id);
+	return 0;
+}
+
+const char *openconnect_get_gp_host_id(struct openconnect_info *vpninfo)
+{
+	return vpninfo->gp_host_id;
+}
+
 int openconnect_set_urlpath(struct openconnect_info *vpninfo,
 			    const char *urlpath)
 {
@@ -1135,6 +1192,36 @@ int openconnect_get_idle_timeout(struct openconnect_info *vpninfo)
 time_t openconnect_get_auth_expiration(struct openconnect_info *vpninfo)
 {
 	return vpninfo->auth_expiration;
+}
+
+int openconnect_get_gp_session_lifetime(struct openconnect_info *vpninfo)
+{
+	return vpninfo->gp_session_lifetime;
+}
+
+time_t openconnect_get_gp_user_expires(struct openconnect_info *vpninfo)
+{
+	return vpninfo->gp_user_expires;
+}
+
+int openconnect_get_gp_lifetime_notify_prior(struct openconnect_info *vpninfo)
+{
+	return vpninfo->gp_lifetime_notify_prior;
+}
+
+const char *openconnect_get_gp_lifetime_notify_message(struct openconnect_info *vpninfo)
+{
+	return vpninfo->gp_lifetime_notify_message;
+}
+
+int openconnect_get_gp_nlb_enabled(struct openconnect_info *vpninfo)
+{
+	return vpninfo->gp_nlb.enabled;
+}
+
+const char *openconnect_get_gp_nlb_connected_gw_ip(struct openconnect_info *vpninfo)
+{
+	return vpninfo->gp_nlb.connected_gw_ip;
 }
 
 int openconnect_get_ip_info(struct openconnect_info *vpninfo,

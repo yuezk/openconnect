@@ -94,6 +94,12 @@ libopenconnect.so.5 libopenconnect5 #MINVER#
  openconnect_set_cookie@OPENCONNECT_5_7 8.20
  openconnect_set_allow_insecure_crypto@OPENCONNECT_5_7 8.20
  openconnect_get_auth_expiration@OPENCONNECT_5_7 8.20
+ openconnect_get_gp_session_lifetime@OPENCONNECT_5_7 8.20
+ openconnect_get_gp_user_expires@OPENCONNECT_5_7 8.20
+ openconnect_get_gp_lifetime_notify_prior@OPENCONNECT_5_7 8.20
+ openconnect_get_gp_lifetime_notify_message@OPENCONNECT_5_7 8.20
+ openconnect_get_gp_nlb_enabled@OPENCONNECT_5_7 8.20
+ openconnect_get_gp_nlb_connected_gw_ip@OPENCONNECT_5_7 8.20
  openconnect_disable_dtls@OPENCONNECT_5_7 8.20
  openconnect_get_connect_url@OPENCONNECT_5_7 8.20
  openconnect_set_webview_callback@OPENCONNECT_5_7 8.20

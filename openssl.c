@@ -2773,3 +2773,211 @@ out_of_memory:
 	return ret;
 }
 
+static int gp_tls12_prf(const EVP_MD *md, const unsigned char *secret, size_t secret_len,
+			const char *label, const unsigned char *seed, size_t seed_len,
+			unsigned char *out, size_t out_len)
+{
+	EVP_PKEY_CTX *pctx = EVP_PKEY_CTX_new_id(EVP_PKEY_TLS1_PRF, NULL);
+	size_t len = out_len;
+	int ret = -1;
+
+	if (!pctx ||
+	    EVP_PKEY_derive_init(pctx) <= 0 ||
+	    EVP_PKEY_CTX_set_tls1_prf_md(pctx, md) <= 0 ||
+	    EVP_PKEY_CTX_set1_tls1_prf_secret(pctx, secret, secret_len) <= 0 ||
+	    EVP_PKEY_CTX_set1_tls1_prf_seed(pctx, (const unsigned char *)label,
+					    strlen(label)) <= 0 ||
+	    EVP_PKEY_CTX_add1_tls1_prf_seed(pctx, seed, seed_len) <= 0 ||
+	    EVP_PKEY_derive(pctx, out, &len) <= 0)
+		goto out;
+	ret = 0;
+out:
+	EVP_PKEY_CTX_free(pctx);
+	return ret;
+}
+
+static const EVP_CIPHER *gp_aes_cbc_cipher(size_t key_size)
+{
+	if (key_size == 32)
+		return EVP_aes_256_cbc();
+	if (key_size == 24)
+		return EVP_aes_192_cbc();
+	return EVP_aes_128_cbc();
+}
+
+static int gp_aes_cbc_decrypt(const EVP_CIPHER *cipher,
+			      const unsigned char *key,
+			      const unsigned char *iv,
+			      const unsigned char *in, int inlen,
+			      unsigned char *out, int *outlen)
+{
+	EVP_CIPHER_CTX *ctx;
+	int outl = 0, tmplen = 0;
+	size_t iv_size = EVP_CIPHER_iv_length(cipher);
+
+	if (!cipher || inlen <= 0 || (inlen % (int)iv_size))
+		return -EINVAL;
+
+	ctx = EVP_CIPHER_CTX_new();
+	if (!ctx)
+		return -ENOMEM;
+
+	if (!EVP_DecryptInit_ex(ctx, cipher, NULL, key, iv) ||
+	    !EVP_CIPHER_CTX_set_padding(ctx, 1) ||
+	    !EVP_DecryptUpdate(ctx, out, &outl, in, inlen) ||
+	    !EVP_DecryptFinal_ex(ctx, out + outl, &tmplen)) {
+		EVP_CIPHER_CTX_free(ctx);
+		return -EINVAL;
+	}
+	*outlen = outl + tmplen;
+	EVP_CIPHER_CTX_free(ctx);
+	return 0;
+}
+
+static int gp_ssl_decrypt_session_ok(struct openconnect_info *vpninfo)
+{
+	SSL *ssl = vpninfo->https_ssl;
+
+	if (!ssl)
+		return -EINVAL;
+	if (SSL_version(ssl) > TLS1_2_VERSION) {
+		vpn_progress(vpninfo, PRG_ERR,
+			     _("NLB blob decrypt requires TLS 1.2 portal session (got %s)\n"),
+			     SSL_get_version(ssl));
+		return -EINVAL;
+	}
+	return 0;
+}
+
+static int gp_tls12_expand_keys(SSL *ssl,
+				unsigned char *key_block, size_t key_block_len,
+				size_t *mac_len, size_t *key_len, size_t *iv_len,
+				unsigned char **srv_key, unsigned char **srv_iv)
+{
+	SSL_SESSION *sess;
+	const SSL_CIPHER *cipher;
+	const EVP_MD *md;
+	const EVP_CIPHER *evp_cipher;
+	unsigned char ms[48], crandom[32], srandom[32], seed[64];
+	size_t ms_len, needed;
+
+	sess = SSL_get_session(ssl);
+	cipher = SSL_SESSION_get_cipher(sess);
+	if (!sess || !cipher)
+		return -EINVAL;
+
+	ms_len = SSL_SESSION_get_master_key(sess, ms, sizeof(ms));
+	if (!ms_len)
+		return -EINVAL;
+
+	if (!SSL_get_client_random(ssl, crandom, sizeof(crandom)) ||
+	    !SSL_get_server_random(ssl, srandom, sizeof(srandom)))
+		return -EINVAL;
+
+	md = EVP_get_digestbynid(SSL_CIPHER_get_digest_nid(cipher));
+	evp_cipher = EVP_get_cipherbynid(SSL_CIPHER_get_cipher_nid(cipher));
+	if (!md || !evp_cipher)
+		return -EINVAL;
+
+	*mac_len = EVP_MD_size(md);
+	*key_len = EVP_CIPHER_key_length(evp_cipher);
+	*iv_len = EVP_CIPHER_iv_length(evp_cipher);
+	needed = 2 * *mac_len + 2 * *key_len + 2 * *iv_len;
+	if (needed > key_block_len)
+		return -EINVAL;
+
+	memcpy(seed, srandom, 32);
+	memcpy(seed + 32, crandom, 32);
+	if (gp_tls12_prf(md, ms, ms_len, "key expansion", seed, sizeof(seed),
+			 key_block, needed))
+		return -EINVAL;
+
+	*srv_key = key_block + 2 * *mac_len + *key_len;
+	*srv_iv = key_block + 2 * *mac_len + 2 * *key_len + *iv_len;
+	return 0;
+}
+
+int gp_ssl_decrypt_blob(struct openconnect_info *vpninfo,
+			const unsigned char *in, int inlen,
+			unsigned char *out, int *outlen)
+{
+	SSL *ssl = vpninfo->https_ssl;
+	unsigned char key_block[128];
+	size_t mac_len, key_len, iv_len;
+	unsigned char *srv_key, *srv_iv;
+
+	if (!ssl || !in || inlen <= 0 || !out || !outlen)
+		return -EINVAL;
+
+	if (gp_ssl_decrypt_session_ok(vpninfo) < 0)
+		return -EINVAL;
+
+	if (gp_tls12_expand_keys(ssl, key_block, sizeof(key_block),
+				 &mac_len, &key_len, &iv_len,
+				 &srv_key, &srv_iv) < 0)
+		return -EINVAL;
+
+	return gp_aes_cbc_decrypt(gp_aes_cbc_cipher(key_len), srv_key, srv_iv,
+				  in, inlen, out, outlen);
+}
+
+int gp_ssl_decrypt_blob_key(struct openconnect_info *vpninfo,
+			    const unsigned char *key, int key_len,
+			    const unsigned char *iv, int iv_len,
+			    const unsigned char *in, int inlen,
+			    unsigned char *out, int *outlen)
+{
+	SSL *ssl = vpninfo->https_ssl;
+	unsigned char key_block[128];
+	size_t mac_len, blk_key_len, blk_iv_len;
+	unsigned char *srv_key, *srv_iv;
+	const unsigned char *use_iv;
+
+	if (!ssl || !key || key_len <= 0 || !in || inlen <= 0 || !out || !outlen)
+		return -EINVAL;
+
+	if (gp_ssl_decrypt_session_ok(vpninfo) < 0)
+		return -EINVAL;
+
+	if (gp_tls12_expand_keys(ssl, key_block, sizeof(key_block),
+				 &mac_len, &blk_key_len, &blk_iv_len,
+				 &srv_key, &srv_iv) < 0)
+		return -EINVAL;
+	use_iv = srv_iv;
+	if (iv && iv_len > 0)
+		use_iv = iv;
+
+	if (key_len != 16 && key_len != 24 && key_len != 32)
+		return -EINVAL;
+
+	return gp_aes_cbc_decrypt(gp_aes_cbc_cipher(key_len), key, use_iv,
+				  in, inlen, out, outlen);
+}
+
+int gp_nlb_hmac_sha1(const unsigned char *key, int key_len,
+		     const unsigned char *data1, int len1,
+		     const unsigned char *data2, int len2,
+		     unsigned char *out)
+{
+	HMAC_CTX *ctx;
+	unsigned int mdlen = SHA1_SIZE;
+
+	if (!key || key_len <= 0 || !data1 || len1 < 0 || !out)
+		return -EINVAL;
+	if (len2 < 0 || (len2 > 0 && !data2))
+		return -EINVAL;
+
+	ctx = HMAC_CTX_new();
+	if (!ctx)
+		return -ENOMEM;
+	if (!HMAC_Init_ex(ctx, key, key_len, EVP_sha1(), NULL) ||
+	    !HMAC_Update(ctx, data1, len1) ||
+	    (len2 > 0 && !HMAC_Update(ctx, data2, len2)) ||
+	    !HMAC_Final(ctx, out, &mdlen)) {
+		HMAC_CTX_free(ctx);
+		return -EINVAL;
+	}
+	HMAC_CTX_free(ctx);
+	return 0;
+}
+

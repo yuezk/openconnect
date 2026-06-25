@@ -96,6 +96,7 @@ class TestConfiguration:
     saml_comments_only: int = None
     saml_needs_js: int = None
     esp: bool = True
+    nlb: bool = False
 C = TestConfiguration()
 OUTSTANDING_SAML_TOKENS = set()
 
@@ -104,7 +105,7 @@ OUTSTANDING_SAML_TOKENS = set()
 def configure():
     global C
     if request.method == 'POST':
-        gateways, portal_2fa, gw_2fa, portal_cookie, portal_saml, gateway_saml, saml_comments_only, saml_needs_js, esp = request.form.get('gateways'), request.form.get('portal_2fa'), request.form.get('gw_2fa'), request.form.get('portal_cookie'), request.form.get('portal_saml'), request.form.get('gateway_saml'), request.form.get('saml_comments_only'), request.form.get('saml_needs_js'), request.form.get('esp')
+        gateways, portal_2fa, gw_2fa, portal_cookie, portal_saml, gateway_saml, saml_comments_only, saml_needs_js, esp, nlb = request.form.get('gateways'), request.form.get('portal_2fa'), request.form.get('gw_2fa'), request.form.get('portal_cookie'), request.form.get('portal_saml'), request.form.get('gateway_saml'), request.form.get('saml_comments_only'), request.form.get('saml_needs_js'), request.form.get('esp'), request.form.get('nlb')
         C.gateways = gateways.split(',') if gateways else ('Default gateway',)
         C.portal_cookie = portal_cookie
         C.portal_2fa = portal_2fa and portal_2fa.strip().lower()
@@ -114,6 +115,7 @@ def configure():
         C.saml_comments_only = int(saml_comments_only) if saml_comments_only else None
         C.saml_needs_js = int(saml_needs_js) if saml_needs_js else None
         C.esp = int(esp) if esp else None
+        C.nlb = bool(int(nlb)) if nlb else False
         return '', 201
     else:
         return 'Current configuration of fake GP server configuration:\n{}\n'.format(C)
@@ -342,7 +344,14 @@ def gateway_login():
 def getconfig():
     session.update(step='gateway-config')
     addrs = '<ip-address>{}</ip-address>'.format(session['preferred_ip'])
-    addrs += '<gw-address>127.0.0.1</gw-address>'
+    if C.nlb:
+        addrs += '<gw-address>127.127.127.127</gw-address>'
+        addrs += '<connected-gw-ip>10.1.2.3</connected-gw-ip>'
+        addrs += '''<hs-key><bits>256</bits><val>0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef</val></hs-key>
+<enc-hs-key>fake-enc-hs-key-blob</enc-hs-key>
+<tunnel-opaque><val>dGVzdC10dW5uZWwtb3BhcXVl</val><valid-period>3600</valid-period></tunnel-opaque>'''
+    else:
+        addrs += '<gw-address>127.0.0.1</gw-address>'
     addrs += '<gw-address-v6>::1</gw-address-v6>'  # some(?) servers send the IPv6 address even if not otherwise configured for IPv6
     if session['ipv6_support'] == 'yes':
         addrs += '<ip-address-v6>{}</ip-address-v6>'.format(session['preferred_ipv6'])
@@ -380,6 +389,9 @@ def hipcheck():
 def tunnel():
     assert 'user' in request.args and 'authcookie' in request.args
     session.update(step='GET-tunnel')
+    if C.nlb:
+        inner = '192.168.255.43'
+        return '110 127.127.127.127{} c057fc7f7c6b74f9ac68b639bb056732404cbacf START_TUNNEL'.format(inner)
     abort(502)
 
 

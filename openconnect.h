@@ -470,6 +470,14 @@ int openconnect_set_http_proxy(struct openconnect_info *vpninfo,
 int openconnect_set_useragent(struct openconnect_info *vpninfo,
 			      const char *useragent);
 
+int openconnect_set_gp_app_version(struct openconnect_info *vpninfo,
+				   const char *gp_app_version);
+int openconnect_set_gp_os_version(struct openconnect_info *vpninfo,
+				  const char *gp_os_version);
+int openconnect_set_gp_host_id(struct openconnect_info *vpninfo,
+			       const char *gp_host_id);
+
+
 int openconnect_passphrase_from_fsid(struct openconnect_info *vpninfo);
 int openconnect_obtain_cookie(struct openconnect_info *vpninfo);
 int openconnect_init_ssl(void);
@@ -655,6 +663,12 @@ void openconnect_set_dpd(struct openconnect_info *, int min_seconds);
 void openconnect_set_trojan_interval(struct openconnect_info *, int seconds);
 int openconnect_get_idle_timeout(struct openconnect_info *);
 time_t openconnect_get_auth_expiration(struct openconnect_info *);
+int openconnect_get_gp_session_lifetime(struct openconnect_info *);
+time_t openconnect_get_gp_user_expires(struct openconnect_info *);
+int openconnect_get_gp_lifetime_notify_prior(struct openconnect_info *);
+const char *openconnect_get_gp_lifetime_notify_message(struct openconnect_info *);
+int openconnect_get_gp_nlb_enabled(struct openconnect_info *);
+const char *openconnect_get_gp_nlb_connected_gw_ip(struct openconnect_info *);
 
 /* The returned structures are owned by the library and may be freed/replaced
    due to rekey or reconnect. Assume that once the mainloop starts, the

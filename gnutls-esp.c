@@ -41,12 +41,16 @@ void destroy_esp_ciphers(struct esp *esp)
 }
 
 static int init_esp_cipher(struct openconnect_info *vpninfo, struct esp *esp,
-			   gnutls_mac_algorithm_t macalg, gnutls_cipher_algorithm_t encalg)
+			   gnutls_mac_algorithm_t macalg, gnutls_cipher_algorithm_t encalg,
+			   int gcm)
 {
 	gnutls_datum_t enc_key;
 	int err;
 
 	destroy_esp_ciphers(esp);
+
+	if (gcm)
+		return 0;
 
 	enc_key.size = gnutls_cipher_get_key_size(encalg);
 	enc_key.data = esp->enc_key;
@@ -71,10 +75,64 @@ static int init_esp_cipher(struct openconnect_info *vpninfo, struct esp *esp,
 	return 0;
 }
 
+static gnutls_cipher_algorithm_t esp_gcm_cipher(const struct openconnect_info *vpninfo)
+{
+	return vpninfo->esp_enc == ENC_AES_256_GCM ?
+		GNUTLS_CIPHER_AES_256_GCM : GNUTLS_CIPHER_AES_128_GCM;
+}
+
+static void esp_gcm_nonce(unsigned char *nonce, const unsigned char *iv, uint32_t seq)
+{
+	memcpy(nonce, iv, ESP_GCM_IV_LEN);
+	memcpy(nonce + ESP_GCM_IV_LEN, &seq, 4);
+}
+
+static int esp_gcm_init(struct openconnect_info *vpninfo, gnutls_cipher_hd_t *hd,
+			const unsigned char *key, const unsigned char *iv, uint32_t seq)
+{
+	gnutls_datum_t enc_key, iv_d;
+	unsigned char nonce[12];
+	gnutls_cipher_algorithm_t encalg = esp_gcm_cipher(vpninfo);
+	int err;
+
+	enc_key.data = (unsigned char *)key;
+	enc_key.size = gnutls_cipher_get_key_size(encalg);
+	esp_gcm_nonce(nonce, iv, seq);
+	iv_d.data = nonce;
+	iv_d.size = sizeof(nonce);
+
+	err = gnutls_cipher_init(hd, encalg, &enc_key, &iv_d);
+	if (err) {
+		vpn_progress(vpninfo, PRG_ERR,
+			     _("Failed to init ESP GCM cipher: %s\n"),
+			     gnutls_strerror(err));
+		return -EIO;
+	}
+	return 0;
+}
+
+static int esp_gcm_aad(struct openconnect_info *vpninfo, gnutls_cipher_hd_t hd,
+		       const struct pkt *pkt)
+{
+	unsigned char aad[8];
+	int err;
+
+	memcpy(aad, &pkt->esp.spi, 8);
+	err = gnutls_cipher_add_auth(hd, aad, sizeof(aad));
+	if (err) {
+		vpn_progress(vpninfo, PRG_ERR,
+			     _("Failed to set ESP GCM AAD: %s\n"),
+			     gnutls_strerror(err));
+		return -EIO;
+	}
+	return 0;
+}
+
 int init_esp_ciphers(struct openconnect_info *vpninfo, struct esp *esp_out, struct esp *esp_in)
 {
-	gnutls_mac_algorithm_t macalg;
+	gnutls_mac_algorithm_t macalg = 0;
 	gnutls_cipher_algorithm_t encalg;
+	int gcm = esp_uses_gcm(vpninfo);
 	int ret;
 
 	switch (vpninfo->esp_enc) {
@@ -84,31 +142,38 @@ int init_esp_ciphers(struct openconnect_info *vpninfo, struct esp *esp_out, stru
 	case ENC_AES_256_CBC:
 		encalg = GNUTLS_CIPHER_AES_256_CBC;
 		break;
-	default:
-		return -EINVAL;
-	}
-
-	switch (vpninfo->esp_hmac) {
-	case HMAC_MD5:
-		macalg = GNUTLS_MAC_MD5;
-		break;
-	case HMAC_SHA1:
-		macalg = GNUTLS_MAC_SHA1;
-		break;
-	case HMAC_SHA256:
-		macalg = GNUTLS_MAC_SHA256;
+	case ENC_AES_128_GCM:
+	case ENC_AES_256_GCM:
+		encalg = esp_gcm_cipher(vpninfo);
 		break;
 	default:
 		return -EINVAL;
 	}
 
-	ret = init_esp_cipher(vpninfo, esp_out, macalg, encalg);
+	if (!gcm) {
+		switch (vpninfo->esp_hmac) {
+		case HMAC_MD5:
+			macalg = GNUTLS_MAC_MD5;
+			break;
+		case HMAC_SHA1:
+			macalg = GNUTLS_MAC_SHA1;
+			break;
+		case HMAC_SHA256:
+			macalg = GNUTLS_MAC_SHA256;
+			break;
+		default:
+			return -EINVAL;
+		}
+	}
+
+	ret = init_esp_cipher(vpninfo, esp_out, macalg, encalg, gcm);
 	if (ret)
 		return ret;
 
-	gnutls_cipher_set_iv(esp_out->cipher, esp_out->iv, sizeof(esp_out->iv));
+	if (!gcm)
+		gnutls_cipher_set_iv(esp_out->cipher, esp_out->iv, sizeof(esp_out->iv));
 
-	ret = init_esp_cipher(vpninfo, esp_in, macalg, encalg);
+	ret = init_esp_cipher(vpninfo, esp_in, macalg, encalg, gcm);
 	if (ret) {
 		destroy_esp_ciphers(esp_out);
 		return ret;
@@ -117,11 +182,50 @@ int init_esp_ciphers(struct openconnect_info *vpninfo, struct esp *esp_out, stru
 	return 0;
 }
 
-/* pkt->len shall be the *payload* length. Omitting the header and the 12-byte HMAC */
+/* pkt->len shall be the *payload* length. Omitting the header and the ICV/HMAC */
 int decrypt_esp_packet(struct openconnect_info *vpninfo, struct esp *esp, struct pkt *pkt)
 {
 	unsigned char hmac_buf[MAX_HMAC_SIZE];
+	gnutls_cipher_hd_t hd = NULL;
 	int err;
+
+	if (verify_packet_seqno(vpninfo, esp, ntohl(pkt->esp.seq)))
+		return -EINVAL;
+
+	if (esp_uses_gcm(vpninfo)) {
+		if (pkt->len < vpninfo->hmac_out_len)
+			return -EINVAL;
+
+		if (esp_gcm_init(vpninfo, &hd, esp->enc_key, pkt->esp.iv, pkt->esp.seq))
+			return -EIO;
+		if (esp_gcm_aad(vpninfo, hd, pkt))
+			goto gcm_fail;
+
+		pkt->len -= vpninfo->hmac_out_len;
+
+		err = gnutls_cipher_decrypt(hd, pkt->data, pkt->len);
+		if (err) {
+			vpn_progress(vpninfo, PRG_DEBUG,
+				     _("Decrypting ESP GCM packet failed: %s\n"),
+				     gnutls_strerror(err));
+			goto gcm_fail;
+		}
+
+		err = gnutls_cipher_tag(hd, hmac_buf, vpninfo->hmac_out_len);
+		if (err ||
+		    memcmp(hmac_buf, pkt->data + pkt->len, vpninfo->hmac_out_len)) {
+			vpn_progress(vpninfo, PRG_DEBUG,
+				     _("Received ESP GCM packet with invalid ICV\n"));
+			goto gcm_fail;
+		}
+
+		gnutls_cipher_deinit(hd);
+		return 0;
+
+	gcm_fail:
+		gnutls_cipher_deinit(hd);
+		return -EINVAL;
+	}
 
 	err = gnutls_hmac(esp->hmac, &pkt->esp, sizeof(pkt->esp) + pkt->len);
 	if (err) {
@@ -136,9 +240,6 @@ int decrypt_esp_packet(struct openconnect_info *vpninfo, struct esp *esp, struct
 			     _("Received ESP packet with invalid HMAC\n"));
 		return -EINVAL;
 	}
-
-	if (verify_packet_seqno(vpninfo, esp, ntohl(pkt->esp.seq)))
-		return -EINVAL;
 
 	gnutls_cipher_set_iv(esp->cipher, pkt->esp.iv, sizeof(pkt->esp.iv));
 
@@ -156,7 +257,39 @@ int decrypt_esp_packet(struct openconnect_info *vpninfo, struct esp *esp, struct
 int encrypt_esp_packet(struct openconnect_info *vpninfo, struct pkt *pkt, int crypt_len)
 {
 	const int blksize = 16;
+	gnutls_cipher_hd_t hd = NULL;
 	int err;
+
+	if (esp_uses_gcm(vpninfo)) {
+		if (esp_gcm_init(vpninfo, &hd, vpninfo->esp_out.enc_key,
+				 pkt->esp.iv, pkt->esp.seq))
+			return -EIO;
+		if (esp_gcm_aad(vpninfo, hd, pkt))
+			goto gcm_enc_fail;
+
+		err = gnutls_cipher_encrypt(hd, pkt->data, crypt_len);
+		if (err) {
+			vpn_progress(vpninfo, PRG_ERR,
+				     _("Failed to encrypt ESP GCM packet: %s\n"),
+				     gnutls_strerror(err));
+			goto gcm_enc_fail;
+		}
+
+		err = gnutls_cipher_tag(hd, pkt->data + crypt_len, vpninfo->hmac_out_len);
+		if (err) {
+			vpn_progress(vpninfo, PRG_ERR,
+				     _("Failed to fetch ESP GCM ICV: %s\n"),
+				     gnutls_strerror(err));
+			goto gcm_enc_fail;
+		}
+
+		gnutls_cipher_deinit(hd);
+		return 0;
+
+	gcm_enc_fail:
+		gnutls_cipher_deinit(hd);
+		return -EIO;
+	}
 
 	err = gnutls_cipher_encrypt(vpninfo->esp_out.cipher, pkt->data, crypt_len);
 	if (err) {

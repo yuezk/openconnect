@@ -1,0 +1,63 @@
+#!/bin/sh
+# Validate RFC4106 ESP-GCM packet layout helpers (nonce + AAD)
+set -eu
+cd "$(dirname "$0")/.."
+CC="${CC:-cc}"
+TMP=$(mktemp -d)
+trap 'rm -rf "$TMP"' EXIT
+
+cat > "$TMP/test.c" <<'EOF'
+#include <stdio.h>
+#include <stdint.h>
+#include <string.h>
+#include <arpa/inet.h>
+
+#define ESP_GCM_IV_LEN 8
+
+static inline uint32_t load_be32(const void *p)
+{
+	uint32_t n;
+	memcpy(&n, p, 4);
+	return ntohl(n);
+}
+
+static void esp_gcm_nonce(unsigned char *nonce, const unsigned char *iv, uint32_t seq)
+{
+	memcpy(nonce, iv, ESP_GCM_IV_LEN);
+	memcpy(nonce + ESP_GCM_IV_LEN, &seq, 4);
+}
+
+static void esp_gcm_aad(unsigned char *aad, uint32_t spi, uint32_t seq)
+{
+	uint32_t be[2];
+
+	be[0] = spi;
+	be[1] = seq;
+	memcpy(aad, be, 8);
+}
+
+int main(void)
+{
+	unsigned char iv[8] = { 1, 2, 3, 4, 5, 6, 7, 8 };
+	unsigned char nonce[12], aad[8];
+	uint32_t seq = htonl(42);
+	uint32_t spi = htonl(0x12345678);
+
+	esp_gcm_nonce(nonce, iv, seq);
+	if (memcmp(nonce, iv, 8) || memcmp(nonce + 8, &seq, 4)) {
+		fprintf(stderr, "nonce construction failed\n");
+		return 1;
+	}
+
+	esp_gcm_aad(aad, spi, seq);
+	if (load_be32(aad) != ntohl(spi) || load_be32(aad + 4) != ntohl(seq)) {
+		fprintf(stderr, "aad construction failed\n");
+		return 1;
+	}
+
+	printf("gp-esp-gcm-roundtrip: OK\n");
+	return 0;
+}
+EOF
+$CC -o "$TMP/test" "$TMP/test.c"
+"$TMP/test"

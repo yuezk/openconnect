@@ -1,0 +1,59 @@
+#!/bin/sh
+# Validate NLB enc-hs-key / tunnel-opaque blob header parsing
+set -eu
+cd "$(dirname "$0")/.."
+CC="${CC:-cc}"
+TMP=$(mktemp -d)
+trap 'rm -rf "$TMP"' EXIT
+
+cat > "$TMP/test.c" <<'EOF'
+#include <stdio.h>
+#include <stdint.h>
+#include <string.h>
+#include <arpa/inet.h>
+
+#define GP_NLB_BLOB_HDR_LEN 24
+#define GP_NLB_BLOB_SESSION_OFF 24
+#define GP_NLB_BLOB_CIPHER_OFF 28
+#define GP_NLB_ENC_HS_KEY_CIPHER_LEN 36
+
+static inline uint32_t load_be32(const void *p)
+{
+	uint32_t n;
+	memcpy(&n, p, 4);
+	return ntohl(n);
+}
+
+int main(void)
+{
+	/* enc-hs-key sample from issue #526 (Australia NLB gateway) */
+	const unsigned char enc_blob[64] = {
+		0x58,0x8b,0xe1,0xc1,0x73,0xf0,0x7d,0x4b,0x87,0x7c,0x47,0x80,0xe3,0x61,0x37,0xe2,
+		0xe5,0xac,0x06,0x00,0x00,0x00,0x00,0x00,0x10,0xa7,0x3b,0x6a,0x70,0x3e,0xbd,0x34,
+		0x9a,0x8f,0x3b,0x81,0x8e,0x8b,0x5b,0x35,0x81,0xd2,0xa0,0xdf,0x14,0xa7,0x17,0x47,
+		0x2c,0x52,0x3b,0x8e,0x99,0x4d,0x39,0x30,0x56,0x5b,0xbe,0xff,0x06,0x1b,0x86,0xf4
+	};
+	uint32_t sid;
+
+	if (sizeof(enc_blob) != 64)
+		return 1;
+	if (enc_blob[16] != 0xe5 || enc_blob[17] != 0xac)
+		return 1;
+	sid = load_be32(enc_blob + GP_NLB_BLOB_SESSION_OFF);
+	if (sid != 0x10a73b6a) {
+		fprintf(stderr, "session id mismatch: 0x%08x\n", sid);
+		return 1;
+	}
+	if (GP_NLB_BLOB_CIPHER_OFF + GP_NLB_ENC_HS_KEY_CIPHER_LEN != (int)sizeof(enc_blob)) {
+		fprintf(stderr, "cipher span mismatch\n");
+		return 1;
+	}
+	if (enc_blob[GP_NLB_BLOB_CIPHER_OFF] != 0x70)
+		return 1;
+
+	printf("gp-nlb-blob-parse: OK\n");
+	return 0;
+}
+EOF
+$CC -o "$TMP/test" "$TMP/test.c"
+"$TMP/test"

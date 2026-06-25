@@ -42,18 +42,11 @@ int print_esp_keys(struct openconnect_info *vpninfo, const char *name, struct es
 	case ENC_AES_256_CBC:
 		enctype = "AES-256-CBC (RFC3602)";
 		break;
-	default:
-		return -EINVAL;
-	}
-	switch (vpninfo->esp_hmac) {
-	case HMAC_MD5:
-		mactype = "HMAC-MD5-96 (RFC2403)";
+	case ENC_AES_128_GCM:
+		enctype = "AES-128-GCM (RFC4106)";
 		break;
-	case HMAC_SHA1:
-		mactype = "HMAC-SHA-1-96 (RFC2404)";
-		break;
-	case HMAC_SHA256:
-		mactype = "HMAC-SHA-256-128 (RFC4868)";
+	case ENC_AES_256_GCM:
+		enctype = "AES-256-GCM (RFC4106)";
 		break;
 	default:
 		return -EINVAL;
@@ -61,8 +54,6 @@ int print_esp_keys(struct openconnect_info *vpninfo, const char *name, struct es
 
 	for (i = 0; i < vpninfo->enc_key_len; i++)
 		sprintf(enckey + (2 * i), "%02x", esp->enc_key[i]);
-	for (i = 0; i < vpninfo->hmac_key_len; i++)
-		sprintf(mackey + (2 * i), "%02x", esp->hmac_key[i]);
 
 	vpn_progress(vpninfo, PRG_TRACE,
 		     _("Parameters for %s ESP: SPI 0x%08x\n"),
@@ -70,9 +61,30 @@ int print_esp_keys(struct openconnect_info *vpninfo, const char *name, struct es
 	vpn_progress(vpninfo, PRG_TRACE,
 		     _("ESP encryption type %s key 0x%s\n"),
 		     enctype, enckey);
-	vpn_progress(vpninfo, PRG_TRACE,
-		     _("ESP authentication type %s key 0x%s\n"),
-		     mactype, mackey);
+	if (esp_uses_gcm(vpninfo)) {
+		vpn_progress(vpninfo, PRG_TRACE,
+			     _("ESP GCM ICV length %d bytes\n"),
+			     vpninfo->hmac_out_len);
+	} else {
+		switch (vpninfo->esp_hmac) {
+		case HMAC_MD5:
+			mactype = "HMAC-MD5-96 (RFC2403)";
+			break;
+		case HMAC_SHA1:
+			mactype = "HMAC-SHA-1-96 (RFC2404)";
+			break;
+		case HMAC_SHA256:
+			mactype = "HMAC-SHA-256-128 (RFC4868)";
+			break;
+		default:
+			return -EINVAL;
+		}
+		for (i = 0; i < vpninfo->hmac_key_len; i++)
+			sprintf(mackey + (2 * i), "%02x", esp->hmac_key[i]);
+		vpn_progress(vpninfo, PRG_TRACE,
+			     _("ESP authentication type %s key 0x%s\n"),
+			     mactype, mackey);
+	}
 	return 0;
 }
 
@@ -103,7 +115,7 @@ int esp_setup(struct openconnect_info *vpninfo)
 int construct_esp_packet(struct openconnect_info *vpninfo, struct pkt *pkt, uint8_t next_hdr)
 {
 	const int blksize = 16;
-	int i, padlen, ret;
+	int i, padlen, ret, crypt_len;
 
 	if (!next_hdr) {
 		if ((pkt->data[0] & 0xf0) == 0x60) /* iph->ip_v */
@@ -112,23 +124,32 @@ int construct_esp_packet(struct openconnect_info *vpninfo, struct pkt *pkt, uint
 			next_hdr = IPPROTO_IPIP;
 	}
 
-	/* This gets much more fun if the IV is variable-length */
 	pkt->esp.spi = vpninfo->esp_out.spi;
 	pkt->esp.seq = htonl(vpninfo->esp_out.seq++);
 
-	padlen = blksize - 1 - ((pkt->len + 1) % blksize);
-	for (i=0; i<padlen; i++)
-		pkt->data[pkt->len + i] = i + 1;
-	pkt->data[pkt->len + padlen] = padlen;
-	pkt->data[pkt->len + padlen + 1] = next_hdr;
+	if (esp_uses_gcm(vpninfo)) {
+		pkt->data[pkt->len] = next_hdr;
+		crypt_len = pkt->len + 1;
+		if (openconnect_random(pkt->esp.iv, ESP_GCM_IV_LEN)) {
+			vpn_progress(vpninfo, PRG_ERR,
+				     _("Failed to generate ESP GCM IV\n"));
+			return -EIO;
+		}
+	} else {
+		padlen = blksize - 1 - ((pkt->len + 1) % blksize);
+		for (i=0; i<padlen; i++)
+			pkt->data[pkt->len + i] = i + 1;
+		pkt->data[pkt->len + padlen] = padlen;
+		pkt->data[pkt->len + padlen + 1] = next_hdr;
+		crypt_len = pkt->len + padlen + 2;
+		memcpy(pkt->esp.iv, vpninfo->esp_out.iv, sizeof(pkt->esp.iv));
+	}
 
-	memcpy(pkt->esp.iv, vpninfo->esp_out.iv, sizeof(pkt->esp.iv));
-
-	ret = encrypt_esp_packet(vpninfo, pkt, pkt->len + padlen + 2);
+	ret = encrypt_esp_packet(vpninfo, pkt, crypt_len);
 	if (ret)
 		return ret;
 
-	return sizeof(pkt->esp) + pkt->len + padlen + 2 + vpninfo->hmac_out_len;
+	return sizeof(pkt->esp) + crypt_len + vpninfo->hmac_out_len;
 }
 
 int esp_mainloop(struct openconnect_info *vpninfo, int *timeout, int readable)
@@ -185,6 +206,18 @@ int esp_mainloop(struct openconnect_info *vpninfo, int *timeout, int readable)
 
 		work_done = 1;
 
+		if (vpninfo->proto->proto == PROTO_GPST && vpninfo->gp_nlb.enabled) {
+			int nlb_ret = gpst_nlb_esp_decap(vpninfo, pkt, &len);
+
+			if (nlb_ret > 0)
+				continue;
+			if (nlb_ret < 0) {
+				vpn_progress(vpninfo, PRG_INFO,
+					     _("Dropped invalid NLB ESP envelope packet\n"));
+				continue;
+			}
+		}
+
 		/* both supported algos (SHA1 and MD5) have 12-byte MAC lengths (RFC2403 and RFC2404) */
 		if (len <= sizeof(pkt->esp) + vpninfo->hmac_out_len)
 			continue;
@@ -230,22 +263,30 @@ int esp_mainloop(struct openconnect_info *vpninfo, int *timeout, int readable)
 			continue;
 		}
 
-		if (len <= 2 + pkt->data[len - 2]) {
-			vpn_progress(vpninfo, PRG_ERR,
-				     _("Invalid padding length %02x in ESP\n"),
-				     pkt->data[len - 2]);
-			continue;
-		}
-		pkt->len = len - 2 - pkt->data[len - 2];
-		for (i = 0 ; i < pkt->data[len - 2]; i++) {
-			if (pkt->data[pkt->len + i] != i + 1)
-				break; /* We can't just 'continue' here because it
-					* would only break out of this 'for' loop */
-		}
-		if (i != pkt->data[len - 2]) {
-			vpn_progress(vpninfo, PRG_ERR,
-				     _("Invalid padding bytes in ESP\n"));
-			continue; /* We can here, though */
+		if (esp_uses_gcm(vpninfo)) {
+			if (len < 1) {
+				vpn_progress(vpninfo, PRG_ERR,
+					     _("Short ESP GCM packet\n"));
+				continue;
+			}
+			pkt->len = len - 1;
+		} else {
+			if (len <= 2 + pkt->data[len - 2]) {
+				vpn_progress(vpninfo, PRG_ERR,
+					     _("Invalid padding length %02x in ESP\n"),
+					     pkt->data[len - 2]);
+				continue;
+			}
+			pkt->len = len - 2 - pkt->data[len - 2];
+			for (i = 0 ; i < pkt->data[len - 2]; i++) {
+				if (pkt->data[pkt->len + i] != i + 1)
+					break;
+			}
+			if (i != pkt->data[len - 2]) {
+				vpn_progress(vpninfo, PRG_ERR,
+					     _("Invalid padding bytes in ESP\n"));
+				continue;
+			}
 		}
 		vpninfo->dtls_times.last_rx = time(NULL);
 
@@ -319,8 +360,16 @@ int esp_mainloop(struct openconnect_info *vpninfo, int *timeout, int readable)
 		vpninfo->dtls_times.last_tx = now;
 	}
 
+	if (vpninfo->proto->proto == PROTO_GPST) {
+		ret = gpst_nlb_maintenance(vpninfo, timeout);
+		if (ret < 0)
+			goto need_reconnect;
+		if (ret > 0)
+			work_done = 1;
+	}
+
 	if (vpninfo->dtls_state != DTLS_ESTABLISHED)
-		return 0;
+		return work_done;
 
 	switch (keepalive_action(&vpninfo->dtls_times, timeout)) {
 	case KA_REKEY:
@@ -341,7 +390,13 @@ int esp_mainloop(struct openconnect_info *vpninfo, int *timeout, int readable)
 		break;
 
 	case KA_KEEPALIVE:
-		vpn_progress(vpninfo, PRG_ERR, _("Keepalive not implemented for ESP\n"));
+		if (vpninfo->proto->proto == PROTO_GPST && vpninfo->gp_nlb.enabled) {
+			if (gpst_nlb_send_esp_keepalive(vpninfo) >= 0)
+				vpninfo->dtls_times.last_tx = time(NULL);
+			work_done = 1;
+		} else {
+			vpn_progress(vpninfo, PRG_ERR, _("Keepalive not implemented for ESP\n"));
+		}
 		break;
 
 	case KA_NONE:
@@ -402,6 +457,15 @@ int esp_mainloop(struct openconnect_info *vpninfo, int *timeout, int readable)
 			len = construct_esp_packet(vpninfo, this, 0);
 			if (len < 0) {
 				/* Should we disable ESP? */
+				free_pkt(vpninfo, this);
+				work_done = 1;
+				continue;
+			}
+
+			if (vpninfo->proto->proto == PROTO_GPST && vpninfo->gp_nlb.enabled &&
+			    gpst_nlb_esp_encap(vpninfo, this, &len) < 0) {
+				vpn_progress(vpninfo, PRG_ERR,
+					     _("Failed to NLB-wrap outbound ESP packet\n"));
 				free_pkt(vpninfo, this);
 				work_done = 1;
 				continue;
@@ -480,7 +544,11 @@ int openconnect_setup_esp_keys(struct openconnect_info *vpninfo, int new_keys)
 	if (!vpninfo->dtls_addr)
 		return -EINVAL;
 
-	if (vpninfo->esp_hmac == HMAC_SHA256)
+	if (esp_uses_gcm(vpninfo)) {
+		if (!vpninfo->esp_gcm_icv)
+			vpninfo->esp_gcm_icv = ESP_GCM_ICV_DEFAULT;
+		vpninfo->hmac_out_len = vpninfo->esp_gcm_icv;
+	} else if (vpninfo->esp_hmac == HMAC_SHA256)
 		vpninfo->hmac_out_len = 16;
 	else /* MD5 and SHA1 */
 		vpninfo->hmac_out_len = 12;
