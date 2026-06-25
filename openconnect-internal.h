@@ -1528,6 +1528,16 @@ static inline int esp_uses_gcm(const struct openconnect_info *vpninfo)
 	       vpninfo->esp_enc == ENC_AES_256_GCM;
 }
 
+static inline int esp_wire_iv_len(const struct openconnect_info *vpninfo)
+{
+	return esp_uses_gcm(vpninfo) ? ESP_GCM_IV_LEN : MAX_IV_SIZE;
+}
+
+static inline int esp_wire_hdr_len(const struct openconnect_info *vpninfo)
+{
+	return 8 + esp_wire_iv_len(vpninfo); /* SPI + seq + IV */
+}
+
 static inline int esp_gcm_cipher_key_len(const struct openconnect_info *vpninfo)
 {
 	return vpninfo->esp_enc == ENC_AES_256_GCM ? 32 : 16;

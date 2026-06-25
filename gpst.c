@@ -873,9 +873,9 @@ static int gpst_get_config(struct openconnect_info *vpninfo)
 		if (!no_esp_reason)
 			vpninfo->ip_info.mtu = calculate_mtu(
 				vpninfo, 1,
-				ESP_HEADER_SIZE + vpninfo->hmac_out_len + MAX_IV_SIZE, /* ESP header size */
-				ESP_FOOTER_SIZE, /* ESP footer (contributes to payload before padding) */
-				16 /* blocksize for both AES-128 and AES-256 */ );
+				ESP_HEADER_SIZE + vpninfo->hmac_out_len + esp_wire_iv_len(vpninfo),
+				esp_uses_gcm(vpninfo) ? 1 : ESP_FOOTER_SIZE,
+				esp_uses_gcm(vpninfo) ? 1 : 16);
 		else
 			vpninfo->ip_info.mtu = calculate_mtu(vpninfo, 0, TLS_OVERHEAD, 0, 1);
 

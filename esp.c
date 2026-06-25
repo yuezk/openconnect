@@ -149,7 +149,7 @@ int construct_esp_packet(struct openconnect_info *vpninfo, struct pkt *pkt, uint
 	if (ret)
 		return ret;
 
-	return sizeof(pkt->esp) + crypt_len + vpninfo->hmac_out_len;
+	return esp_wire_hdr_len(vpninfo) + crypt_len + vpninfo->hmac_out_len;
 }
 
 int esp_mainloop(struct openconnect_info *vpninfo, int *timeout, int readable)
@@ -219,10 +219,12 @@ int esp_mainloop(struct openconnect_info *vpninfo, int *timeout, int readable)
 		}
 
 		/* both supported algos (SHA1 and MD5) have 12-byte MAC lengths (RFC2403 and RFC2404) */
-		if (len <= sizeof(pkt->esp) + vpninfo->hmac_out_len)
+		if (len <= esp_wire_hdr_len(vpninfo) + vpninfo->hmac_out_len)
 			continue;
 
-		len -= sizeof(pkt->esp) + vpninfo->hmac_out_len;
+		len -= esp_wire_hdr_len(vpninfo) + vpninfo->hmac_out_len;
+		if (esp_uses_gcm(vpninfo))
+			memmove(pkt->data, (unsigned char *)&pkt->esp + esp_wire_hdr_len(vpninfo), len);
 		pkt->len = len;
 
 		if (pkt->esp.spi == esp->spi) {
