@@ -13,6 +13,7 @@ cat > "$TMP/test.c" <<'EOF'
 #include <arpa/inet.h>
 
 #define ESP_GCM_IV_LEN 8
+#define ESP_GCM_SALT_LEN 4
 
 static inline uint32_t load_be32(const void *p)
 {
@@ -21,10 +22,11 @@ static inline uint32_t load_be32(const void *p)
 	return ntohl(n);
 }
 
-static void esp_gcm_nonce(unsigned char *nonce, const unsigned char *iv, uint32_t seq)
+static void esp_gcm_nonce(unsigned char *nonce, const unsigned char *enc_key,
+			  int keylen, const unsigned char *iv)
 {
-	memcpy(nonce, iv, ESP_GCM_IV_LEN);
-	memcpy(nonce + ESP_GCM_IV_LEN, &seq, 4);
+	memcpy(nonce, enc_key + keylen, ESP_GCM_SALT_LEN);
+	memcpy(nonce + ESP_GCM_SALT_LEN, iv, ESP_GCM_IV_LEN);
 }
 
 static void esp_gcm_aad(unsigned char *aad, uint32_t spi, uint32_t seq)
@@ -38,13 +40,21 @@ static void esp_gcm_aad(unsigned char *aad, uint32_t spi, uint32_t seq)
 
 int main(void)
 {
+	unsigned char enc_key[36] = {
+		0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+		0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
+		0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
+		0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
+		0xaa, 0xbb, 0xcc, 0xdd,
+	};
 	unsigned char iv[8] = { 1, 2, 3, 4, 5, 6, 7, 8 };
 	unsigned char nonce[12], aad[8];
+	unsigned char expect_nonce[12] = { 0xaa, 0xbb, 0xcc, 0xdd, 1, 2, 3, 4, 5, 6, 7, 8 };
 	uint32_t seq = htonl(42);
 	uint32_t spi = htonl(0x12345678);
 
-	esp_gcm_nonce(nonce, iv, seq);
-	if (memcmp(nonce, iv, 8) || memcmp(nonce + 8, &seq, 4)) {
+	esp_gcm_nonce(nonce, enc_key, 32, iv);
+	if (memcmp(nonce, expect_nonce, sizeof(nonce))) {
 		fprintf(stderr, "nonce construction failed\n");
 		return 1;
 	}

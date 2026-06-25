@@ -1118,6 +1118,7 @@ static inline void __monitor_fd_new(struct openconnect_info *vpninfo,
 #define HMAC_SHA256		3
 
 #define ESP_GCM_IV_LEN		8
+#define ESP_GCM_SALT_LEN	4
 #define ESP_GCM_ICV_DEFAULT	16
 
 #define MAX_HMAC_SIZE		32	/* SHA256 */
@@ -1525,6 +1526,22 @@ static inline int esp_uses_gcm(const struct openconnect_info *vpninfo)
 {
 	return vpninfo->esp_enc == ENC_AES_128_GCM ||
 	       vpninfo->esp_enc == ENC_AES_256_GCM;
+}
+
+static inline int esp_gcm_cipher_key_len(const struct openconnect_info *vpninfo)
+{
+	return vpninfo->esp_enc == ENC_AES_256_GCM ? 32 : 16;
+}
+
+static inline void esp_gcm_nonce(unsigned char *nonce,
+				 const unsigned char *enc_key,
+				 const struct openconnect_info *vpninfo,
+				 const unsigned char *iv)
+{
+	int keylen = esp_gcm_cipher_key_len(vpninfo);
+
+	memcpy(nonce, enc_key + keylen, ESP_GCM_SALT_LEN);
+	memcpy(nonce + ESP_GCM_SALT_LEN, iv, ESP_GCM_IV_LEN);
 }
 
 int gp_ssl_decrypt_blob(struct openconnect_info *vpninfo,

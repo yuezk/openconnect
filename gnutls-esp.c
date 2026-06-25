@@ -81,14 +81,8 @@ static gnutls_cipher_algorithm_t esp_gcm_cipher(const struct openconnect_info *v
 		GNUTLS_CIPHER_AES_256_GCM : GNUTLS_CIPHER_AES_128_GCM;
 }
 
-static void esp_gcm_nonce(unsigned char *nonce, const unsigned char *iv, uint32_t seq)
-{
-	memcpy(nonce, iv, ESP_GCM_IV_LEN);
-	memcpy(nonce + ESP_GCM_IV_LEN, &seq, 4);
-}
-
 static int esp_gcm_init(struct openconnect_info *vpninfo, gnutls_cipher_hd_t *hd,
-			const unsigned char *key, const unsigned char *iv, uint32_t seq)
+			const unsigned char *key, const unsigned char *iv)
 {
 	gnutls_datum_t enc_key, iv_d;
 	unsigned char nonce[12];
@@ -96,8 +90,8 @@ static int esp_gcm_init(struct openconnect_info *vpninfo, gnutls_cipher_hd_t *hd
 	int err;
 
 	enc_key.data = (unsigned char *)key;
-	enc_key.size = gnutls_cipher_get_key_size(encalg);
-	esp_gcm_nonce(nonce, iv, seq);
+	enc_key.size = esp_gcm_cipher_key_len(vpninfo);
+	esp_gcm_nonce(nonce, key, vpninfo, iv);
 	iv_d.data = nonce;
 	iv_d.size = sizeof(nonce);
 
@@ -196,7 +190,7 @@ int decrypt_esp_packet(struct openconnect_info *vpninfo, struct esp *esp, struct
 		if (pkt->len < vpninfo->hmac_out_len)
 			return -EINVAL;
 
-		if (esp_gcm_init(vpninfo, &hd, esp->enc_key, pkt->esp.iv, pkt->esp.seq))
+		if (esp_gcm_init(vpninfo, &hd, esp->enc_key, pkt->esp.iv))
 			return -EIO;
 		if (esp_gcm_aad(vpninfo, hd, pkt))
 			goto gcm_fail;
@@ -261,8 +255,7 @@ int encrypt_esp_packet(struct openconnect_info *vpninfo, struct pkt *pkt, int cr
 	int err;
 
 	if (esp_uses_gcm(vpninfo)) {
-		if (esp_gcm_init(vpninfo, &hd, vpninfo->esp_out.enc_key,
-				 pkt->esp.iv, pkt->esp.seq))
+		if (esp_gcm_init(vpninfo, &hd, vpninfo->esp_out.enc_key, pkt->esp.iv))
 			return -EIO;
 		if (esp_gcm_aad(vpninfo, hd, pkt))
 			goto gcm_enc_fail;
