@@ -1544,14 +1544,11 @@ static inline int esp_gcm_cipher_key_len(const struct openconnect_info *vpninfo)
 }
 
 static inline void esp_gcm_nonce(unsigned char *nonce,
-				 const unsigned char *enc_key,
-				 const struct openconnect_info *vpninfo,
-				 const unsigned char *iv)
+				 const unsigned char *iv,
+				 uint32_t seq)
 {
-	int keylen = esp_gcm_cipher_key_len(vpninfo);
-
-	memcpy(nonce, enc_key + keylen, ESP_GCM_SALT_LEN);
-	memcpy(nonce + ESP_GCM_SALT_LEN, iv, ESP_GCM_IV_LEN);
+	memcpy(nonce, iv, ESP_GCM_IV_LEN);
+	memcpy(nonce + ESP_GCM_IV_LEN, &seq, sizeof(seq));
 }
 
 int gp_ssl_decrypt_blob(struct openconnect_info *vpninfo,

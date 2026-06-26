@@ -82,7 +82,7 @@ static gnutls_cipher_algorithm_t esp_gcm_cipher(const struct openconnect_info *v
 }
 
 static int esp_gcm_init(struct openconnect_info *vpninfo, gnutls_cipher_hd_t *hd,
-			const unsigned char *key, const unsigned char *iv)
+			const unsigned char *key, const unsigned char *iv, uint32_t seq)
 {
 	gnutls_datum_t enc_key, iv_d;
 	unsigned char nonce[12];
@@ -91,7 +91,7 @@ static int esp_gcm_init(struct openconnect_info *vpninfo, gnutls_cipher_hd_t *hd
 
 	enc_key.data = (unsigned char *)key;
 	enc_key.size = esp_gcm_cipher_key_len(vpninfo);
-	esp_gcm_nonce(nonce, key, vpninfo, iv);
+	esp_gcm_nonce(nonce, iv, seq);
 	iv_d.data = nonce;
 	iv_d.size = sizeof(nonce);
 
@@ -190,7 +190,7 @@ int decrypt_esp_packet(struct openconnect_info *vpninfo, struct esp *esp, struct
 		if (pkt->len < vpninfo->hmac_out_len)
 			return -EINVAL;
 
-		if (esp_gcm_init(vpninfo, &hd, esp->enc_key, pkt->esp.iv))
+		if (esp_gcm_init(vpninfo, &hd, esp->enc_key, pkt->esp.iv, pkt->esp.seq))
 			return -EIO;
 		if (esp_gcm_aad(vpninfo, hd, pkt))
 			goto gcm_fail;
@@ -255,7 +255,7 @@ int encrypt_esp_packet(struct openconnect_info *vpninfo, struct pkt *pkt, int cr
 	int err;
 
 	if (esp_uses_gcm(vpninfo)) {
-		if (esp_gcm_init(vpninfo, &hd, vpninfo->esp_out.enc_key, pkt->esp.iv))
+		if (esp_gcm_init(vpninfo, &hd, vpninfo->esp_out.enc_key, pkt->esp.iv, pkt->esp.seq))
 			return -EIO;
 		if (esp_gcm_aad(vpninfo, hd, pkt))
 			goto gcm_enc_fail;

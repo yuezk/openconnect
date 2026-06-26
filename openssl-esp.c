@@ -64,11 +64,12 @@ static const EVP_CIPHER *esp_gcm_cipher(const struct openconnect_info *vpninfo)
 }
 
 static int esp_gcm_init(struct openconnect_info *vpninfo, EVP_CIPHER_CTX *ctx,
-			const unsigned char *key, const unsigned char *iv, int enc)
+			const unsigned char *key, const unsigned char *iv,
+			uint32_t seq, int enc)
 {
 	unsigned char nonce[12];
 
-	esp_gcm_nonce(nonce, key, vpninfo, iv);
+	esp_gcm_nonce(nonce, iv, seq);
 	if (!EVP_CipherInit_ex(ctx, esp_gcm_cipher(vpninfo), NULL, key, nonce, enc))
 		return -EIO;
 	if (!EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_AEAD_SET_IVLEN, sizeof(nonce), NULL))
@@ -217,7 +218,7 @@ int decrypt_esp_packet(struct openconnect_info *vpninfo, struct esp *esp, struct
 		if (!ctx)
 			return -ENOMEM;
 
-		if (esp_gcm_init(vpninfo, ctx, esp->enc_key, pkt->esp.iv, 0) < 0 ||
+		if (esp_gcm_init(vpninfo, ctx, esp->enc_key, pkt->esp.iv, pkt->esp.seq, 0) < 0 ||
 		    esp_gcm_aad(vpninfo, ctx, pkt) < 0) {
 			EVP_CIPHER_CTX_free(ctx);
 			return -EINVAL;
@@ -280,7 +281,7 @@ int encrypt_esp_packet(struct openconnect_info *vpninfo, struct pkt *pkt, int cr
 		if (!ctx)
 			return -ENOMEM;
 
-		if (esp_gcm_init(vpninfo, ctx, vpninfo->esp_out.enc_key, pkt->esp.iv, 1) < 0 ||
+		if (esp_gcm_init(vpninfo, ctx, vpninfo->esp_out.enc_key, pkt->esp.iv, pkt->esp.seq, 1) < 0 ||
 		    esp_gcm_aad(vpninfo, ctx, pkt) < 0 ||
 		    !EVP_EncryptUpdate(ctx, pkt->data, &outlen, pkt->data, crypt_len) ||
 		    !EVP_EncryptFinal_ex(ctx, pkt->data + outlen, &outlen) ||
