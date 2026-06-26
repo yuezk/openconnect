@@ -149,6 +149,16 @@ int construct_esp_packet(struct openconnect_info *vpninfo, struct pkt *pkt, uint
 	if (ret)
 		return ret;
 
+	/* GCM uses an 8-byte on-wire IV (16-byte header) but pkt->data sits
+	 * after the full 24-byte ESP struct prefix. Pack ciphertext + ICV
+	 * immediately after the wire header so send(&pkt->esp, ...) is linear. */
+	if (esp_uses_gcm(vpninfo)) {
+		int hdr = esp_wire_hdr_len(vpninfo);
+
+		memmove((unsigned char *)&pkt->esp + hdr, pkt->data,
+			crypt_len + vpninfo->hmac_out_len);
+	}
+
 	return esp_wire_hdr_len(vpninfo) + crypt_len + vpninfo->hmac_out_len;
 }
 

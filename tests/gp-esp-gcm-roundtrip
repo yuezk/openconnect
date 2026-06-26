@@ -56,6 +56,25 @@ int main(void)
 		return 1;
 	}
 
+	/* GCM wire header is 16 bytes but pkt->data follows a 24-byte ESP prefix */
+	{
+		struct { uint32_t spi, seq; unsigned char iv[16]; unsigned char data[32]; } pkt;
+		unsigned char expect[33];
+		int crypt_len = 17, icv_len = 16, hdr = 16;
+		unsigned char *wire = (unsigned char *)&pkt.spi;
+
+		memset(&pkt, 0xcc, sizeof(pkt));
+		memset(pkt.data, 0xdd, crypt_len);
+		memset(pkt.data + crypt_len, 0xee, icv_len);
+		memcpy(expect, pkt.data, sizeof(expect));
+		memmove(wire + hdr, pkt.data, crypt_len + icv_len);
+		if (memcmp(wire + hdr, expect, crypt_len + icv_len) ||
+		    wire[8] != 0xcc || wire[15] != 0xcc) {
+			fprintf(stderr, "wire pack layout failed\n");
+			return 1;
+		}
+	}
+
 	printf("gp-esp-gcm-roundtrip: OK\n");
 	return 0;
 }

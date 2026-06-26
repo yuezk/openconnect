@@ -1806,12 +1806,19 @@ int gpst_esp_send_probes(struct openconnect_info *vpninfo)
 	}
 
 	int pktlen = construct_esp_packet(vpninfo, pkt, vpninfo->esp_magic_af == AF_INET6 ? IPPROTO_IPV6 : IPPROTO_IPIP);
-	if (pktlen < 0)
+
+	if (pktlen < 0) {
 		vpn_progress(vpninfo, PRG_DEBUG, _("Failed to send ESP probe\n"));
-	else if (vpninfo->gp_nlb.enabled && gpst_nlb_esp_encap(vpninfo, pkt, &pktlen) < 0)
-		vpn_progress(vpninfo, PRG_ERR, _("Failed to NLB-wrap ESP probe\n"));
-	else if (send(vpninfo->dtls_fd, (void *)&pkt->esp, pktlen, 0) < 0)
-		vpn_progress(vpninfo, PRG_DEBUG, _("Failed to send ESP probe\n"));
+	} else {
+		if (vpninfo->dtls_state != DTLS_ESTABLISHED) {
+			vpn_progress(vpninfo, PRG_TRACE, _("ESP probe wire packet (%d bytes):\n"), pktlen);
+			dump_buf_hex(vpninfo, PRG_TRACE, '>', (void *)&pkt->esp, pktlen);
+		}
+		if (vpninfo->gp_nlb.enabled && gpst_nlb_esp_encap(vpninfo, pkt, &pktlen) < 0)
+			vpn_progress(vpninfo, PRG_ERR, _("Failed to NLB-wrap ESP probe\n"));
+		else if (send(vpninfo->dtls_fd, (void *)&pkt->esp, pktlen, 0) < 0)
+			vpn_progress(vpninfo, PRG_DEBUG, _("Failed to send ESP probe\n"));
+	}
 
 	free_pkt(vpninfo, pkt);
 
