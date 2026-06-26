@@ -415,6 +415,67 @@ out:
 }
 #endif
 
+static int gpst_is_usable_ipv4(const char *addr)
+{
+	struct in_addr a;
+
+	if (!addr || inet_pton(AF_INET, addr, &a) != 1)
+		return 0;
+	return a.s_addr != htonl(INADDR_ANY);
+}
+
+static int gpst_set_nlb_vip(struct openconnect_info *vpninfo, const char *addr)
+{
+	char *dup;
+
+	if (!gpst_is_usable_ipv4(addr))
+		return 0;
+
+	dup = strdup(addr);
+	if (!dup)
+		return -ENOMEM;
+
+	free(vpninfo->gp_nlb.tunnel_vip);
+	vpninfo->gp_nlb.tunnel_vip = dup;
+	return 0;
+}
+
+static int gpst_replace_str(char **dst, const char *src)
+{
+	char *dup;
+
+	if (!gpst_is_usable_ipv4(src))
+		return 0;
+
+	dup = strdup(src);
+	if (!dup)
+		return -ENOMEM;
+
+	free(*dst);
+	*dst = dup;
+	return 0;
+}
+
+static void gpst_parse_nlb_tunnel_opaque(struct openconnect_info *vpninfo,
+					 xmlNode *xml_node)
+{
+	xmlNode *member;
+	char *s = NULL;
+
+	for (member = xml_node->children; member; member = member->next) {
+		if (!xmlnode_get_val(member, "val", &s)) {
+			free(vpninfo->gp_nlb.tunnel_opaque);
+			vpninfo->gp_nlb.tunnel_opaque = s;
+			s = NULL;
+			vpninfo->gp_nlb.enabled = 1;
+		} else if (!xmlnode_get_val(member, "valid-period", &s)) {
+			vpninfo->gp_nlb.opaque_valid_until = time(NULL) + atol(s);
+		}
+		free(s);
+		s = NULL;
+	}
+}
+
 /* Return value:
  *  < 0, on error
  *  = 0, on success; *form is populated
@@ -425,6 +486,8 @@ static int gpst_parse_config_xml(struct openconnect_info *vpninfo, xmlNode *xml_
 	int n_dns = 0;
 	int ret = 0;
 	char *s = NULL;
+	char *nlb_ip_candidate = NULL;
+	char *nlb_gw_candidate = NULL;
 	int ii;
 
 #ifdef HAVE_ESP
@@ -445,9 +508,11 @@ static int gpst_parse_config_xml(struct openconnect_info *vpninfo, xmlNode *xml_
 
 	/* Parse config */
 	for (xml_node = xml_node->children; xml_node; xml_node=xml_node->next) {
-		if (!xmlnode_get_val(xml_node, "ip-address", &s))
+		if (!xmlnode_get_val(xml_node, "ip-address", &s)) {
+			if ((ret = gpst_replace_str(&nlb_ip_candidate, s)))
+				goto err;
 			new_ip_info.addr = add_option_steal(&new_opts, "ipaddr", &s);
-		else if (!xmlnode_get_val(xml_node, "ip-address-v6", &s)) {
+		} else if (!xmlnode_get_val(xml_node, "ip-address-v6", &s)) {
 			if (!vpninfo->disable_ipv6)
 				new_ip_info.addr6 = add_option_steal(&new_opts, "ipaddr6", &s);
 		} else if (!xmlnode_get_val(xml_node, "netmask", &s)) {
@@ -493,17 +558,17 @@ static int gpst_parse_config_xml(struct openconnect_info *vpninfo, xmlNode *xml_
 			 * gateway is meaningless." See esp_send_probes_gp for the
 			 * gory details of what this field actually means.
 			 */
-			if (!strcmp(s, "127.127.127.127")) {
-				free(vpninfo->gp_nlb.tunnel_vip);
-				vpninfo->gp_nlb.tunnel_vip = strdup(s);
-			}
+			if ((ret = gpst_set_nlb_vip(vpninfo, s)))
+				goto err;
 			if (vpninfo->peer_addr->sa_family == IPPROTO_IP &&
 			    vpninfo->ip_info.gateway_addr && strcmp(s, vpninfo->ip_info.gateway_addr))
 				vpn_progress(vpninfo, PRG_DEBUG,
 					     _("Legacy IP gateway address in config XML (%s) differs from external gateway address (%s).\n"), s, vpninfo->ip_info.gateway_addr);
 #ifdef HAVE_ESP
-			have_esp_magic_v4 = 1;
-			inet_pton(AF_INET, s, &esp_magic_v4);
+			if (gpst_is_usable_ipv4(s)) {
+				have_esp_magic_v4 = 1;
+				inet_pton(AF_INET, s, &esp_magic_v4);
+			}
 #endif /* HAVE_ESP */
 		} else if (!xmlnode_get_val(xml_node, "gw-address-v6", &s)) {
 			if (vpninfo->peer_addr->sa_family == IPPROTO_IPV6 &&
@@ -619,17 +684,12 @@ static int gpst_parse_config_xml(struct openconnect_info *vpninfo, xmlNode *xml_
 			s = NULL;
 			vpninfo->gp_nlb.enabled = 1;
 		} else if (xmlnode_is_named(xml_node, "tunnel-opaque")) {
-			if (!xmlnode_get_val(xml_node, "val", &s)) {
-				free(vpninfo->gp_nlb.tunnel_opaque);
-				vpninfo->gp_nlb.tunnel_opaque = s;
-				s = NULL;
-				vpninfo->gp_nlb.enabled = 1;
-			}
-			if (!xmlnode_get_val(xml_node, "valid-period", &s)) {
-				vpninfo->gp_nlb.opaque_valid_until = time(NULL) + atol(s);
-			}
+			gpst_parse_nlb_tunnel_opaque(vpninfo, xml_node);
 		} else if (!xmlnode_get_val(xml_node, "valid-period", &s)) {
 			vpninfo->gp_nlb.opaque_valid_until = time(NULL) + atol(s);
+		} else if (!xmlnode_get_val(xml_node, "default-gateway", &s)) {
+			if ((ret = gpst_replace_str(&nlb_gw_candidate, s)))
+				goto err;
 		} else if (!xmlnode_get_val(xml_node, "in-tunnel-gw-cert-chksum", &s)) {
 			free(vpninfo->gp_nlb.in_tunnel_gw_cert_chksum);
 			vpninfo->gp_nlb.in_tunnel_gw_cert_chksum = s;
@@ -637,7 +697,6 @@ static int gpst_parse_config_xml(struct openconnect_info *vpninfo, xmlNode *xml_
 		} else if (xmlnode_is_named(xml_node, "need-tunnel")
 			   || xmlnode_is_named(xml_node, "bw-c2s")
 			   || xmlnode_is_named(xml_node, "bw-s2c")
-			   || xmlnode_is_named(xml_node, "default-gateway")
 			   || xmlnode_is_named(xml_node, "default-gateway-v6")
 			   || xmlnode_is_named(xml_node, "no-direct-access-to-local-network")
 			   || xmlnode_is_named(xml_node, "ip-address-preferred")
@@ -659,6 +718,14 @@ static int gpst_parse_config_xml(struct openconnect_info *vpninfo, xmlNode *xml_
 
 	if (vpninfo->gp_nlb.tunnel_opaque)
 		vpninfo->gp_nlb.enabled = 1;
+	if (vpninfo->gp_nlb.enabled && !vpninfo->gp_nlb.tunnel_vip) {
+		if (nlb_gw_candidate)
+			ret = gpst_set_nlb_vip(vpninfo, nlb_gw_candidate);
+		else if (nlb_ip_candidate)
+			ret = gpst_set_nlb_vip(vpninfo, nlb_ip_candidate);
+		if (ret)
+			goto err;
+	}
 
 	if (vpninfo->gp_nlb.enabled) {
 		vpn_progress(vpninfo, PRG_INFO,
@@ -716,10 +783,15 @@ cannot_esp:
 #endif
 
 	free(s);
+	free(nlb_ip_candidate);
+	free(nlb_gw_candidate);
+	nlb_ip_candidate = nlb_gw_candidate = NULL;
 
 	ret = install_vpn_opts(vpninfo, new_opts, &new_ip_info);
 	if (ret) {
 	err:
+		free(nlb_ip_candidate);
+		free(nlb_gw_candidate);
 		free_optlist(new_opts);
 		free_split_routes(&new_ip_info);
 	}
@@ -775,14 +847,7 @@ static int gpst_parse_nlb_opaque_xml(struct openconnect_info *vpninfo, xmlNode *
 			s = NULL;
 			vpninfo->gp_nlb.enabled = 1;
 		} else if (xmlnode_is_named(xml_node, "tunnel-opaque")) {
-			if (!xmlnode_get_val(xml_node, "val", &s)) {
-				free(vpninfo->gp_nlb.tunnel_opaque);
-				vpninfo->gp_nlb.tunnel_opaque = s;
-				s = NULL;
-				vpninfo->gp_nlb.enabled = 1;
-			}
-			if (!xmlnode_get_val(xml_node, "valid-period", &s))
-				vpninfo->gp_nlb.opaque_valid_until = time(NULL) + atol(s);
+			gpst_parse_nlb_tunnel_opaque(vpninfo, xml_node);
 		} else if (!xmlnode_get_val(xml_node, "valid-period", &s)) {
 			vpninfo->gp_nlb.opaque_valid_until = time(NULL) + atol(s);
 		}

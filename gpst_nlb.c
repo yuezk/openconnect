@@ -12,7 +12,7 @@
  *   enc-hs-key    Base64 encrypted auxiliary key; likely decrypts tunnel-opaque
  *   tunnel-opaque Base64 blob stored internally as opaqueBlob
  *   valid-period  Seconds until tunnel-opaque must be refreshed via getconfig.esp
- *   gw-address    ESP magic / VIP; NLB gateways use 127.127.127.127
+ *   gw-address    ESP magic / VIP when provided by the gateway
  *   connected-gw-ip  NLB frontend address (may differ from DNS peer)
  *
  * ESP path (pan_esp_encap.cpp, PanNATTunnelVPN.cpp):
@@ -38,7 +38,7 @@
  *   - SendTunnelRequest: user=%s&authcookie=%s&install=yes&preferred-ip=%s&preferred-ipv6=%s
  *   - Response is raw line protocol, not an HTTP status line. NLB format (issue #526):
  *       "110 <vip><inner_gw_ip> <40-hex-sha1> START_TUNNEL"
- *     Example: "110 127.127.127.127192.168.255.43 c057fc7f... START_TUNNEL"
+ *     Example: "110 <vip><inner_gw_ip> c057fc7f... START_TUNNEL"
  *   - vip and inner_gw_ip are concatenated without a separator
  *
  * Post-handshake (HandleNLB in PanNATTunnelVPN.cpp):
@@ -46,14 +46,14 @@
  *   - "NLB: add an access route for NLB private ip: %s."
  *
  * NLB blob layout (PanGPS 6.3.3.1 RE, shared by enc-hs-key and tunnel-opaque):
- *   0-15   header prefix (stored; first 16 bytes of enc-hs-key blob)
- *  16-23   version marker (e.g. e5ac060000000000)
- *  24-27   tunnel session id (cleartext, matches across blobs from same session)
- *  28+     encrypted payload (enc-hs-key: 36 bytes; tunnel-opaque: 508 bytes)
+ *   0-15   clear header prefix
+ *  16+     encrypted payload on observed gateways. Some older RE notes treated
+ *          bytes 16-27 as clear metadata and payload at 28; keep that as a
+ *          compatibility candidate when its length is block-aligned.
  *
  * PanGPS do_ssl_decrypt / decrypt_data (6.3.3.1 RE):
  *   - TLS 1.2 "key expansion" yields server write key + IV
- *   - EVP AES-CBC decrypt on ciphertext after the 28-byte cleartext prefix
+ *   - EVP AES-CBC decrypt on the block-aligned ciphertext payload
  *   - enc-hs-key yields the hs-key material; tunnel-opaque uses that key with
  *     the same TLS server write IV
  */
@@ -79,10 +79,10 @@ static const unsigned char gp_nlb_probe_template[56] =
 
 #define GP_NLB_SSL_PROTO_VERSION 110
 #define GP_NLB_OPAQUE_REFRESH_MARGIN 60
-#define GP_NLB_BLOB_HDR_LEN		24
+#define GP_NLB_BLOB_PREFIX_LEN		16
 #define GP_NLB_BLOB_SESSION_OFF		24
-#define GP_NLB_BLOB_CIPHER_OFF		28
-#define GP_NLB_ENC_HS_KEY_CIPHER_LEN	36
+#define GP_NLB_BLOB_LEGACY_CIPHER_OFF	28
+#define GP_NLB_AES_BLOCK_LEN		16
 #define GP_NLB_HDR_AUTH_LEN		6
 #define GP_NLB_HDR_SIGN_LEN		10
 
@@ -95,11 +95,11 @@ static int gp_nlb_is_ipv4(const char *s)
 static int gp_nlb_split_concat_ips(const char *concat, const char *hint_vip,
 				     char **vip, char **inner)
 {
-	const char *split;
-	size_t vip_len;
+	size_t concat_len, i, vip_len;
 
 	if (!concat || !*concat)
 		return -EINVAL;
+	concat_len = strlen(concat);
 
 	if (hint_vip && !strncmp(concat, hint_vip, strlen(hint_vip))) {
 		vip_len = strlen(hint_vip);
@@ -110,16 +110,18 @@ static int gp_nlb_split_concat_ips(const char *concat, const char *hint_vip,
 		}
 	}
 
-	for (split = concat; *split; split++) {
-		if (*split != '.' && !isdigit((unsigned char)*split))
+	for (i = 1; i < concat_len && i <= 15; i++) {
+		char candidate[16];
+
+		if (concat_len - i > 15)
 			continue;
-		if (!gp_nlb_is_ipv4(concat) || !gp_nlb_is_ipv4(split))
+		memcpy(candidate, concat, i);
+		candidate[i] = '\0';
+
+		if (!gp_nlb_is_ipv4(candidate) || !gp_nlb_is_ipv4(concat + i))
 			continue;
-		vip_len = split - concat;
-		if (!vip_len)
-			continue;
-		*vip = strndup(concat, vip_len);
-		*inner = strdup(split);
+		*vip = strdup(candidate);
+		*inner = strdup(concat + i);
 		if (!*vip || !*inner) {
 			free(*vip);
 			free(*inner);
@@ -150,84 +152,134 @@ static int gp_nlb_parse_blob_header(struct openconnect_info *vpninfo,
 				    const unsigned char *blob, int len,
 				    struct gp_nlb_config *nlb)
 {
-	if (!blob || len < GP_NLB_BLOB_HDR_LEN)
+	if (!blob || len < GP_NLB_BLOB_PREFIX_LEN)
 		return -EINVAL;
 
-	nlb->blob_session_id = load_be32(blob + GP_NLB_BLOB_SESSION_OFF);
+	if (len >= GP_NLB_BLOB_SESSION_OFF + 4)
+		nlb->blob_session_id = load_be32(blob + GP_NLB_BLOB_SESSION_OFF);
 	vpn_progress(vpninfo, PRG_DEBUG,
-		     _("NLB blob session id 0x%08x, version marker %02x%02x%02x%02x\n"),
-		     nlb->blob_session_id,
-		     blob[16], blob[17], blob[18], blob[19]);
+		     _("NLB blob decoded length %d, session candidate 0x%08x, marker candidate %02x%02x%02x%02x\n"),
+		     len, nlb->blob_session_id,
+		     len > 16 ? blob[16] : 0, len > 17 ? blob[17] : 0,
+		     len > 18 ? blob[18] : 0, len > 19 ? blob[19] : 0);
 	return 0;
+}
+
+static int gp_nlb_cipher_len(int len, int offset)
+{
+	if (len <= offset)
+		return -EINVAL;
+	if ((len - offset) % GP_NLB_AES_BLOCK_LEN)
+		return -EINVAL;
+	return len - offset;
 }
 
 static int gp_nlb_decrypt_enc_hs_key(struct openconnect_info *vpninfo,
 				     struct gp_nlb_config *nlb,
 				     const unsigned char *blob, int len)
 {
+	static const int offsets[] = { GP_NLB_BLOB_LEGACY_CIPHER_OFF, GP_NLB_BLOB_PREFIX_LEN };
 	unsigned char plain[64];
-	int plain_len = sizeof(plain);
-	int ret;
+	int ret = -EINVAL;
+	unsigned i;
 
 	if (!nlb->enc_hs_key)
 		return 0;
-	if (len < GP_NLB_BLOB_CIPHER_OFF + GP_NLB_ENC_HS_KEY_CIPHER_LEN)
-		return -EINVAL;
 
-	ret = gp_ssl_decrypt_blob(vpninfo,
-				  blob + GP_NLB_BLOB_CIPHER_OFF,
-				  GP_NLB_ENC_HS_KEY_CIPHER_LEN,
-				  plain, &plain_len);
-	if (ret < 0) {
-		vpn_progress(vpninfo, PRG_ERR,
-			     _("enc-hs-key TLS decipherment failed\n"));
-		return -EINVAL;
+	for (i = 0; i < sizeof(offsets) / sizeof(offsets[0]); i++) {
+		int offset = offsets[i];
+		int cipher_len = gp_nlb_cipher_len(len, offset);
+		int plain_len = sizeof(plain);
+
+		if (cipher_len < 0) {
+			vpn_progress(vpninfo, PRG_DEBUG,
+				     _("Skipping enc-hs-key decrypt offset %d for decoded length %d\n"),
+				     offset, len);
+			continue;
+		}
+
+		ret = gp_ssl_decrypt_blob(vpninfo, blob + offset, cipher_len,
+					  plain, &plain_len);
+		if (ret < 0) {
+			vpn_progress(vpninfo, PRG_DEBUG,
+				     _("enc-hs-key decrypt failed at offset %d cipher_len %d\n"),
+				     offset, cipher_len);
+			continue;
+		}
+
+		if (plain_len <= 0 || plain_len > (int)sizeof(nlb->opaque_key)) {
+			memset(plain, 0, sizeof(plain));
+			ret = -EINVAL;
+			continue;
+		}
+
+		memcpy(nlb->opaque_key, plain, plain_len);
+		nlb->opaque_key_len = plain_len;
+		memset(plain, 0, sizeof(plain));
+		vpn_progress(vpninfo, PRG_DEBUG,
+			     _("Decrypted enc-hs-key at offset %d (%d bytes)\n"),
+			     offset, plain_len);
+		return 0;
 	}
 
-	if (plain_len <= 0 || plain_len > (int)sizeof(nlb->opaque_key))
-		return -EINVAL;
-
-	memcpy(nlb->opaque_key, plain, plain_len);
-	nlb->opaque_key_len = plain_len;
 	memset(plain, 0, sizeof(plain));
-	vpn_progress(vpninfo, PRG_DEBUG,
-		     _("Decrypted enc-hs-key (%d bytes)\n"), plain_len);
-	return 0;
+	vpn_progress(vpninfo, PRG_ERR,
+		     _("enc-hs-key TLS decipherment failed\n"));
+	return ret;
 }
 
 static int gp_nlb_decrypt_opaque_body(struct openconnect_info *vpninfo,
 				      struct gp_nlb_config *nlb)
 {
+	static const int offsets[] = { GP_NLB_BLOB_LEGACY_CIPHER_OFF, GP_NLB_BLOB_PREFIX_LEN };
 	const unsigned char *payload;
-	int payload_len, out_len;
+	int payload_len, out_len, ret = -EINVAL;
 	unsigned char *out;
+	unsigned i;
 
-	if (!nlb->opaque_blob || nlb->opaque_blob_len <= GP_NLB_BLOB_CIPHER_OFF)
+	if (!nlb->opaque_blob || nlb->opaque_blob_len <= GP_NLB_BLOB_PREFIX_LEN)
 		return 0;
 	if (!nlb->opaque_key_len)
 		return -EINVAL;
 
-	payload = nlb->opaque_blob + GP_NLB_BLOB_CIPHER_OFF;
-	payload_len = nlb->opaque_blob_len - GP_NLB_BLOB_CIPHER_OFF;
-	out = malloc(payload_len);
+	out = malloc(nlb->opaque_blob_len);
 	if (!out)
 		return -ENOMEM;
-	out_len = payload_len;
 
-	if (gp_ssl_decrypt_blob_key(vpninfo, nlb->opaque_key, nlb->opaque_key_len,
-				    NULL, 0, payload, payload_len, out, &out_len) < 0) {
+	for (i = 0; i < sizeof(offsets) / sizeof(offsets[0]); i++) {
+		int offset = offsets[i];
+
+		payload_len = gp_nlb_cipher_len(nlb->opaque_blob_len, offset);
+		if (payload_len < 0) {
+			vpn_progress(vpninfo, PRG_DEBUG,
+				     _("Skipping tunnel-opaque decrypt offset %d for decoded length %d\n"),
+				     offset, nlb->opaque_blob_len);
+			continue;
+		}
+
+		payload = nlb->opaque_blob + offset;
+		out_len = payload_len;
+		if (gp_ssl_decrypt_blob_key(vpninfo, nlb->opaque_key, nlb->opaque_key_len,
+					    NULL, 0, payload, payload_len, out, &out_len) < 0) {
+			vpn_progress(vpninfo, PRG_DEBUG,
+				     _("tunnel-opaque decrypt failed at offset %d cipher_len %d\n"),
+				     offset, payload_len);
+			continue;
+		}
+
+		memset(out, 0, out_len);
 		free(out);
-		vpn_progress(vpninfo, PRG_ERR,
-			     _("tunnel-opaque body decipherment failed\n"));
-		return -EINVAL;
+		nlb->opaque_body_ready = 1;
+		vpn_progress(vpninfo, PRG_DEBUG,
+			     _("Decrypted tunnel-opaque body at offset %d (%d bytes)\n"),
+			     offset, out_len);
+		return 0;
 	}
 
-	memset(out, 0, out_len);
 	free(out);
-	nlb->opaque_body_ready = 1;
-	vpn_progress(vpninfo, PRG_DEBUG,
-		     _("Decrypted tunnel-opaque body (%d bytes)\n"), out_len);
-	return 0;
+	vpn_progress(vpninfo, PRG_ERR,
+		     _("tunnel-opaque body decipherment failed\n"));
+	return ret;
 }
 
 static void gp_nlb_write_hdr(unsigned char *hdr, struct gp_nlb_config *nlb,
@@ -322,7 +374,7 @@ int gpst_nlb_prepare(struct openconnect_info *vpninfo)
 			     nlb->tunnel_vip);
 	} else if (!nlb->tunnel_vip && nlb->tunnel_opaque) {
 		vpn_progress(vpninfo, PRG_DEBUG,
-			     _("NLB enabled but no tunnel VIP yet; expecting 127.127.127.127 from <gw-address>\n"));
+			     _("NLB enabled but no tunnel VIP yet; expecting a usable gateway-provided IPv4 address\n"));
 	}
 
 	gp_nlb_clear_opaque_blob(nlb);
@@ -541,7 +593,7 @@ int gpst_nlb_parse_ssl_response(const char *buf, int len, struct gp_nlb_config *
 	}
 	concat++;
 
-	hint_vip = nlb->tunnel_vip ?: "127.127.127.127";
+	hint_vip = nlb->tunnel_vip;
 	if (gp_nlb_split_concat_ips(concat, hint_vip, &vip, &inner)) {
 		ret = -EINVAL;
 		goto out;
