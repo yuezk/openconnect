@@ -317,6 +317,9 @@ int gpst_nlb_prepare(struct openconnect_info *vpninfo)
 	if (nlb->tunnel_vip && inet_pton(AF_INET, nlb->tunnel_vip, &vip) == 1) {
 		vpninfo->esp_magic_af = AF_INET;
 		memcpy(vpninfo->esp_magic, &vip, sizeof(vip));
+		vpn_progress(vpninfo, PRG_INFO,
+			     _("NLB tunnel VIP for ESP probes: %s\n"),
+			     nlb->tunnel_vip);
 	} else if (!nlb->tunnel_vip && nlb->tunnel_opaque) {
 		vpn_progress(vpninfo, PRG_DEBUG,
 			     _("NLB enabled but no tunnel VIP yet; expecting 127.127.127.127 from <gw-address>\n"));
@@ -372,9 +375,11 @@ int gpst_nlb_prepare(struct openconnect_info *vpninfo)
 	}
 
 	vpn_progress(vpninfo, PRG_INFO,
-		     _("NLB crypto ready: hs_key=%d bytes opaque_key=%d bytes opaque_body=%s\n"),
+		     _("NLB crypto ready: hs_key=%d bytes opaque_key=%d bytes opaque_body=%s refresh=%llds\n"),
 		     nlb->hs_key_len, nlb->opaque_key_len,
-		     nlb->opaque_body_ready ? "ready" : "none");
+		     nlb->opaque_body_ready ? "ready" : "none",
+		     (long long)(nlb->opaque_valid_until ?
+				 nlb->opaque_valid_until - time(NULL) : 0));
 	return 0;
 }
 
@@ -395,7 +400,9 @@ int gpst_nlb_send_esp_keepalive(struct openconnect_info *vpninfo)
 	gp_nlb_write_hdr(hdr, &vpninfo->gp_nlb, 0, GP_NLB_TYPE_KEEPALIVE);
 	if (gp_nlb_sign_hdr(vpninfo, &vpninfo->gp_nlb, hdr, NULL, 0) < 0)
 		return -EINVAL;
-	vpn_progress(vpninfo, PRG_DEBUG, _("Send NLB ESP keepalive\n"));
+	vpn_progress(vpninfo, PRG_INFO,
+		     _("Send NLB ESP keepalive envelope: seq=%u len=%zu\n"),
+		     load_be16(hdr + 4), sizeof(hdr));
 	if (send(vpninfo->dtls_fd, hdr, sizeof(hdr), 0) < 0) {
 		vpn_progress(vpninfo, PRG_DEBUG,
 			     _("Failed to send NLB ESP keepalive: %s\n"),
@@ -467,8 +474,9 @@ int gpst_nlb_esp_decap(struct openconnect_info *vpninfo, struct pkt *pkt, int *l
 	if (type == GP_NLB_TYPE_KEEPALIVE) {
 		if (gp_nlb_verify_hdr(vpninfo, &vpninfo->gp_nlb, wire, NULL, 0) < 0)
 			return -EINVAL;
-		vpn_progress(vpninfo, PRG_DEBUG,
-			     _("Got NLB ESP keepalive response\n"));
+		vpn_progress(vpninfo, PRG_INFO,
+			     _("Got NLB ESP keepalive response: seq=%u\n"),
+			     load_be16(wire + 4));
 		return 1;
 	}
 
@@ -666,6 +674,9 @@ int gpst_nlb_apply_routes(struct openconnect_info *vpninfo)
 		     nlb->inner_gw_ip);
 
 	if (install_vpn_opts(vpninfo, new_opts, &new_ip_info)) {
+		vpn_progress(vpninfo, PRG_ERR,
+			     _("NLB: failed to add access route for NLB private ip: %s.\n"),
+			     nlb->inner_gw_ip);
 		free_split_routes(&new_ip_info);
 		ret = -EINVAL;
 		goto err;
@@ -723,8 +734,10 @@ int gpst_nlb_handle_ssl_connect_response(struct openconnect_info *vpninfo,
 	if (!buf || len <= 0)
 		return -EINVAL;
 
-	if (len >= 12 && !strncmp(buf, start_tunnel, 12))
+	if (len >= 12 && !strncmp(buf, start_tunnel, 12)) {
+		vpn_progress(vpninfo, PRG_INFO, _("NLB SSL tunnel response: START_TUNNEL\n"));
 		return gpst_nlb_on_ssl_tunnel(vpninfo);
+	}
 
 	if (!strstr(buf, start_tunnel))
 		return -EINVAL;
@@ -732,5 +745,10 @@ int gpst_nlb_handle_ssl_connect_response(struct openconnect_info *vpninfo,
 	if (gpst_nlb_parse_ssl_response(buf, len, &vpninfo->gp_nlb) < 0)
 		return -EINVAL;
 
+	vpn_progress(vpninfo, PRG_INFO,
+		     _("NLB SSL tunnel response: vip=%s inner_gw=%s cert_hash=%s\n"),
+		     vpninfo->gp_nlb.tunnel_vip ?: "unknown",
+		     vpninfo->gp_nlb.inner_gw_ip ?: "unknown",
+		     vpninfo->gp_nlb.in_tunnel_gw_cert_chksum ? "present" : "missing");
 	return gpst_nlb_on_ssl_tunnel(vpninfo);
 }

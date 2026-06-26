@@ -1521,6 +1521,7 @@ void destroy_esp_ciphers(struct esp *esp);
 int init_esp_ciphers(struct openconnect_info *vpninfo, struct esp *out, struct esp *in);
 int decrypt_esp_packet(struct openconnect_info *vpninfo, struct esp *esp, struct pkt *pkt);
 int encrypt_esp_packet(struct openconnect_info *vpninfo, struct pkt *pkt, int crypt_len);
+int esp_gcm_auth_outgoing(struct openconnect_info *vpninfo, struct pkt *pkt, int crypt_len);
 
 static inline int esp_uses_gcm(const struct openconnect_info *vpninfo)
 {
@@ -1538,17 +1539,38 @@ static inline int esp_wire_hdr_len(const struct openconnect_info *vpninfo)
 	return 8 + esp_wire_iv_len(vpninfo); /* SPI + seq + IV */
 }
 
+static inline int esp_gcm_auth_len(const struct openconnect_info *vpninfo)
+{
+	return 0;
+}
+
+static inline int esp_trailer_len(const struct openconnect_info *vpninfo)
+{
+	if (esp_uses_gcm(vpninfo))
+		return vpninfo->esp_gcm_icv + esp_gcm_auth_len(vpninfo);
+	return vpninfo->hmac_out_len;
+}
+
 static inline int esp_gcm_cipher_key_len(const struct openconnect_info *vpninfo)
 {
 	return vpninfo->esp_enc == ENC_AES_256_GCM ? 32 : 16;
 }
 
+static inline int esp_gpst_gcm_omits_next_hdr(const struct openconnect_info *vpninfo)
+{
+	return 0;
+}
+
 static inline void esp_gcm_nonce(unsigned char *nonce,
+				 const unsigned char *enc_key,
+				 const struct openconnect_info *vpninfo,
 				 const unsigned char *iv,
 				 uint32_t seq)
 {
-	memcpy(nonce, iv, ESP_GCM_IV_LEN);
-	memcpy(nonce + ESP_GCM_IV_LEN, &seq, sizeof(seq));
+	(void)seq;
+	/* RFC4106 nonce = 4-byte salt from the ESP key tail || 8-byte packet IV. */
+	memcpy(nonce, enc_key + esp_gcm_cipher_key_len(vpninfo), ESP_GCM_SALT_LEN);
+	memcpy(nonce + ESP_GCM_SALT_LEN, iv, ESP_GCM_IV_LEN);
 }
 
 int gp_ssl_decrypt_blob(struct openconnect_info *vpninfo,

@@ -29,6 +29,24 @@
 #include <stdlib.h>
 #include <errno.h>
 
+#define GPST_ESP_PROBE_BURST	3
+#define ESP_FOOTER_SIZE		2
+
+static void gpst_send_probe_burst(struct openconnect_info *vpninfo)
+{
+	int i;
+
+	if (!vpninfo->proto->udp_send_probes)
+		return;
+
+	for (i = 0; i < GPST_ESP_PROBE_BURST; i++) {
+		if (i)
+			vpninfo->udp_probes_sent++;
+		vpninfo->proto->udp_send_probes(vpninfo);
+	}
+	time(&vpninfo->dtls_times.last_tx);
+}
+
 int print_esp_keys(struct openconnect_info *vpninfo, const char *name, struct esp *esp)
 {
 	int i;
@@ -64,7 +82,11 @@ int print_esp_keys(struct openconnect_info *vpninfo, const char *name, struct es
 	if (esp_uses_gcm(vpninfo)) {
 		vpn_progress(vpninfo, PRG_TRACE,
 			     _("ESP GCM ICV length %d bytes\n"),
-			     vpninfo->hmac_out_len);
+			     vpninfo->esp_gcm_icv);
+		if (esp_gcm_auth_len(vpninfo))
+			vpn_progress(vpninfo, PRG_TRACE,
+				     _("ESP GCM auth length %d bytes\n"),
+				     esp_gcm_auth_len(vpninfo));
 	} else {
 		switch (vpninfo->esp_hmac) {
 		case HMAC_MD5:
@@ -106,7 +128,9 @@ int esp_setup(struct openconnect_info *vpninfo)
 	print_esp_keys(vpninfo, _("outgoing"), &vpninfo->esp_out);
 
 	vpn_progress(vpninfo, PRG_DEBUG, _("Send ESP probes\n"));
-	if (vpninfo->proto->udp_send_probes)
+	if (vpninfo->proto->proto == PROTO_GPST)
+		gpst_send_probe_burst(vpninfo);
+	else if (vpninfo->proto->udp_send_probes)
 		vpninfo->proto->udp_send_probes(vpninfo);
 
 	return 0;
@@ -128,8 +152,12 @@ int construct_esp_packet(struct openconnect_info *vpninfo, struct pkt *pkt, uint
 	pkt->esp.seq = htonl(vpninfo->esp_out.seq++);
 
 	if (esp_uses_gcm(vpninfo)) {
-		pkt->data[pkt->len] = next_hdr;
-		crypt_len = pkt->len + 1;
+		padlen = (blksize - ((pkt->len + ESP_FOOTER_SIZE + ESP_GCM_IV_LEN) % blksize)) % blksize;
+		for (i=0; i<padlen; i++)
+			pkt->data[pkt->len + i] = i + 1;
+		pkt->data[pkt->len + padlen] = padlen;
+		pkt->data[pkt->len + padlen + 1] = next_hdr;
+		crypt_len = pkt->len + padlen + ESP_FOOTER_SIZE;
 		if (openconnect_random(pkt->esp.iv, ESP_GCM_IV_LEN)) {
 			vpn_progress(vpninfo, PRG_ERR,
 				     _("Failed to generate ESP GCM IV\n"));
@@ -156,10 +184,10 @@ int construct_esp_packet(struct openconnect_info *vpninfo, struct pkt *pkt, uint
 		int hdr = esp_wire_hdr_len(vpninfo);
 
 		memmove((unsigned char *)&pkt->esp + hdr, pkt->data,
-			crypt_len + vpninfo->hmac_out_len);
+			crypt_len + vpninfo->esp_gcm_icv);
 	}
 
-	return esp_wire_hdr_len(vpninfo) + crypt_len + vpninfo->hmac_out_len;
+	return esp_wire_hdr_len(vpninfo) + crypt_len + esp_trailer_len(vpninfo);
 }
 
 int esp_mainloop(struct openconnect_info *vpninfo, int *timeout, int readable)
@@ -229,12 +257,16 @@ int esp_mainloop(struct openconnect_info *vpninfo, int *timeout, int readable)
 		}
 
 		/* both supported algos (SHA1 and MD5) have 12-byte MAC lengths (RFC2403 and RFC2404) */
-		if (len <= esp_wire_hdr_len(vpninfo) + vpninfo->hmac_out_len)
+		if (len <= esp_wire_hdr_len(vpninfo) + esp_trailer_len(vpninfo))
 			continue;
 
-		len -= esp_wire_hdr_len(vpninfo) + vpninfo->hmac_out_len;
-		if (esp_uses_gcm(vpninfo))
+		if (esp_uses_gcm(vpninfo)) {
+			/* GCM+auth keeps ICV and HMAC in pkt->data for decrypt_esp_packet(). */
+			len -= esp_wire_hdr_len(vpninfo);
 			memmove(pkt->data, (unsigned char *)&pkt->esp + esp_wire_hdr_len(vpninfo), len);
+		} else {
+			len -= esp_wire_hdr_len(vpninfo) + esp_trailer_len(vpninfo);
+		}
 		pkt->len = len;
 
 		if (pkt->esp.spi == esp->spi) {
@@ -254,34 +286,55 @@ int esp_mainloop(struct openconnect_info *vpninfo, int *timeout, int readable)
 			continue;
 		}
 
-		/* Possible values of the Next Header field are:
-		   0x04: IP[v4]-in-IP
-		   0x05: supposed to mean Internet Stream Protocol
-		         (XXX: but used for LZO compressed IPv4 packets by Juniper)
-		   0x29: IPv6 encapsulation */
-		if (pkt->data[len - 1] == 0x04)
-			vpn_progress(vpninfo, PRG_TRACE, _("Received ESP Legacy IP packet of %d bytes\n"),
-				     len);
-		else if (pkt->data[len - 1] == 0x05)
-			vpn_progress(vpninfo, PRG_TRACE, _("Received ESP Legacy IP packet of %d bytes (LZO-compressed)\n"),
-				     len);
-		else if (pkt->data[len - 1] == 0x29)
-			vpn_progress(vpninfo, PRG_TRACE, _("Received ESP IPv6 packet of %d bytes\n"),
-				     len);
-		else {
-			vpn_progress(vpninfo, PRG_ERR,
-				     _("Received ESP packet of %d bytes with unrecognised payload type %02x\n"),
-				     len, pkt->data[len-1]);
-			continue;
-		}
+		len = pkt->len;
 
-		if (esp_uses_gcm(vpninfo)) {
+		uint8_t payload_type;
+		int gpst_gcm_no_next_hdr = esp_gpst_gcm_omits_next_hdr(vpninfo);
+
+		if (gpst_gcm_no_next_hdr) {
 			if (len < 1) {
 				vpn_progress(vpninfo, PRG_ERR,
 					     _("Short ESP GCM packet\n"));
 				continue;
 			}
-			pkt->len = len - 1;
+			if ((pkt->data[0] & 0xf0) == 0x40)
+				payload_type = 0x04;
+			else if ((pkt->data[0] & 0xf0) == 0x60)
+				payload_type = 0x29;
+			else
+				payload_type = pkt->data[0];
+		} else {
+			payload_type = pkt->data[len - 1];
+		}
+
+		/* Possible values of the Next Header field are:
+		   0x04: IP[v4]-in-IP
+		   0x05: supposed to mean Internet Stream Protocol
+		         (XXX: but used for LZO compressed IPv4 packets by Juniper)
+		   0x29: IPv6 encapsulation */
+		if (payload_type == 0x04)
+			vpn_progress(vpninfo, PRG_TRACE, _("Received ESP Legacy IP packet of %d bytes\n"),
+				     len);
+		else if (payload_type == 0x05)
+			vpn_progress(vpninfo, PRG_TRACE, _("Received ESP Legacy IP packet of %d bytes (LZO-compressed)\n"),
+				     len);
+		else if (payload_type == 0x29)
+			vpn_progress(vpninfo, PRG_TRACE, _("Received ESP IPv6 packet of %d bytes\n"),
+				     len);
+		else {
+			vpn_progress(vpninfo, PRG_ERR,
+				     _("Received ESP packet of %d bytes with unrecognised payload type %02x\n"),
+				     len, payload_type);
+			continue;
+		}
+
+		if (esp_uses_gcm(vpninfo)) {
+			if (len <= 2 + pkt->data[len - 2]) {
+				vpn_progress(vpninfo, PRG_ERR,
+					     _("Short ESP GCM packet\n"));
+				continue;
+			}
+			pkt->len = len - 2 - pkt->data[len - 2];
 		} else {
 			if (len <= 2 + pkt->data[len - 2]) {
 				vpn_progress(vpninfo, PRG_ERR,
@@ -559,7 +612,6 @@ int openconnect_setup_esp_keys(struct openconnect_info *vpninfo, int new_keys)
 	if (esp_uses_gcm(vpninfo)) {
 		if (!vpninfo->esp_gcm_icv)
 			vpninfo->esp_gcm_icv = ESP_GCM_ICV_DEFAULT;
-		vpninfo->hmac_out_len = vpninfo->esp_gcm_icv;
 	} else if (vpninfo->esp_hmac == HMAC_SHA256)
 		vpninfo->hmac_out_len = 16;
 	else /* MD5 and SHA1 */
@@ -589,9 +641,12 @@ int openconnect_setup_esp_keys(struct openconnect_info *vpninfo, int new_keys)
 	}
 
 	/* This is the minimum; some implementations may increase it */
-	vpninfo->pkt_trailer = MAX_ESP_PAD + MAX_IV_SIZE + MAX_HMAC_SIZE;
+	vpninfo->pkt_trailer = MAX_ESP_PAD + MAX_IV_SIZE + MAX_HMAC_SIZE +
+			       ESP_GCM_ICV_DEFAULT;
 
 	vpninfo->esp_out.seq = vpninfo->esp_out.seq_backlog = 0;
+	if (vpninfo->proto->proto == PROTO_GPST)
+		vpninfo->esp_out.seq = 1;
 	esp_in->seq = esp_in->seq_backlog = 0;
 
 	ret = init_esp_ciphers(vpninfo, &vpninfo->esp_out, esp_in);

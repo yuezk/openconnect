@@ -660,9 +660,17 @@ static int gpst_parse_config_xml(struct openconnect_info *vpninfo, xmlNode *xml_
 	if (vpninfo->gp_nlb.tunnel_opaque)
 		vpninfo->gp_nlb.enabled = 1;
 
-	if (vpninfo->gp_nlb.enabled)
-		vpn_progress(vpninfo, PRG_INFO, _("NLB enabled\n"));
-	else
+	if (vpninfo->gp_nlb.enabled) {
+		vpn_progress(vpninfo, PRG_INFO,
+			     _("NLB enabled: hs_key=%d bytes enc_hs_key=%s tunnel_opaque=%s vip=%s connected_gw=%s refresh=%llds\n"),
+			     vpninfo->gp_nlb.hs_key_len,
+			     vpninfo->gp_nlb.enc_hs_key ? "present" : "missing",
+			     vpninfo->gp_nlb.tunnel_opaque ? "present" : "missing",
+			     vpninfo->gp_nlb.tunnel_vip ?: "unknown",
+			     vpninfo->gp_nlb.connected_gw_ip ?: "unknown",
+			     (long long)(vpninfo->gp_nlb.opaque_valid_until ?
+					 vpninfo->gp_nlb.opaque_valid_until - time(NULL) : 0));
+	} else
 		vpn_progress(vpninfo, PRG_DEBUG,
 			     _("hs-key section is not specified. Non-nlb\n"));
 
@@ -873,7 +881,7 @@ static int gpst_get_config(struct openconnect_info *vpninfo)
 		if (!no_esp_reason)
 			vpninfo->ip_info.mtu = calculate_mtu(
 				vpninfo, 1,
-				ESP_HEADER_SIZE + vpninfo->hmac_out_len + esp_wire_iv_len(vpninfo),
+				ESP_HEADER_SIZE + esp_trailer_len(vpninfo) + esp_wire_iv_len(vpninfo),
 				esp_uses_gcm(vpninfo) ? 1 : ESP_FOOTER_SIZE,
 				esp_uses_gcm(vpninfo) ? 1 : 16);
 		else
@@ -1652,6 +1660,8 @@ static inline uint16_t csum(void *buf, int nwords)
 }
 
 static char magic_ping_payload[16] __attribute__((nonstring)) = "monitor\x00\x00pan ha "; /* NOT NUL-terminated */
+static char magic_ping_payload_gcm[48] __attribute__((nonstring)) =
+	"monitor\x00\x00pan ha 0123456789:;<=>? !\"#$%&'()*+,-./";
 
 int gpst_esp_send_probes(struct openconnect_info *vpninfo)
 {
@@ -1679,6 +1689,9 @@ int gpst_esp_send_probes(struct openconnect_info *vpninfo)
 
 	if (vpninfo->gp_nlb.enabled) {
 		probe_payload = gpst_nlb_probe_payload(&probe_payload_len);
+	} else if (esp_uses_gcm(vpninfo)) {
+		probe_payload = (const unsigned char *)magic_ping_payload_gcm;
+		probe_payload_len = sizeof(magic_ping_payload_gcm);
 	} else {
 		probe_payload = (const unsigned char *)magic_ping_payload;
 		probe_payload_len = sizeof(magic_ping_payload);
@@ -1832,7 +1845,10 @@ int gpst_esp_catch_probe(struct openconnect_info *vpninfo, struct pkt *pkt)
 
 	if (vpninfo->gp_nlb.enabled)
 		probe_payload = gpst_nlb_probe_payload(&probe_payload_len);
-	else {
+	else if (esp_uses_gcm(vpninfo)) {
+		probe_payload = (const unsigned char *)magic_ping_payload_gcm;
+		probe_payload_len = sizeof(magic_ping_payload_gcm);
+	} else {
 		probe_payload = (const unsigned char *)magic_ping_payload;
 		probe_payload_len = sizeof(magic_ping_payload);
 	}
