@@ -442,28 +442,6 @@ const unsigned char *gpst_nlb_probe_payload(size_t *len)
 	return gp_nlb_probe_template;
 }
 
-int gpst_nlb_send_esp_keepalive(struct openconnect_info *vpninfo)
-{
-	unsigned char hdr[GP_NLB_HDR_LEN];
-
-	if (!vpninfo->gp_nlb.enabled || vpninfo->dtls_fd < 0)
-		return 0;
-
-	gp_nlb_write_hdr(hdr, &vpninfo->gp_nlb, 0, GP_NLB_TYPE_KEEPALIVE);
-	if (gp_nlb_sign_hdr(vpninfo, &vpninfo->gp_nlb, hdr, NULL, 0) < 0)
-		return -EINVAL;
-	vpn_progress(vpninfo, PRG_INFO,
-		     _("Send NLB ESP keepalive envelope: seq=%u len=%zu\n"),
-		     load_be16(hdr + 4), sizeof(hdr));
-	if (send(vpninfo->dtls_fd, hdr, sizeof(hdr), 0) < 0) {
-		vpn_progress(vpninfo, PRG_DEBUG,
-			     _("Failed to send NLB ESP keepalive: %s\n"),
-			     strerror(errno));
-		return -errno;
-	}
-	return 0;
-}
-
 int gpst_nlb_esp_encap(struct openconnect_info *vpninfo, struct pkt *pkt, int *len)
 {
 	int esplen;

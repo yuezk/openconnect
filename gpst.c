@@ -811,8 +811,8 @@ static int gpst_build_getconfig_request(struct openconnect_info *vpninfo,
 	append_opt(request_body, "ipv6-support", vpninfo->disable_ipv6 ? "no" : "yes");
 	append_opt(request_body, "clientos", gpst_os_name(vpninfo));
 	append_opt(request_body, "os-version", openconnect_get_gp_os_version(vpninfo));
-	append_opt(request_body, "hmac-algo", "sha1,md5,sha256");
-	append_opt(request_body, "enc-algo", "aes-256-gcm,aes-128-gcm,aes-128-cbc");
+	append_opt(request_body, "hmac-algo", "sha1,");
+	append_opt(request_body, "enc-algo", "aes-256-gcm,aes-128-gcm,aes-128-cbc,");
 	append_opt(request_body, "clientgpversion", app_version);
 	if (openconnect_get_gp_host_id(vpninfo))
 		append_opt(request_body, "host-id", openconnect_get_gp_host_id(vpninfo));
@@ -1728,6 +1728,150 @@ static char magic_ping_payload[16] __attribute__((nonstring)) = "monitor\x00\x00
 static char magic_ping_payload_gcm[48] __attribute__((nonstring)) =
 	"monitor\x00\x00pan ha 0123456789:;<=>? !\"#$%&'()*+,-./";
 
+static int gpst_build_icmp_probe_packet(struct openconnect_info *vpninfo,
+					struct pkt *pkt, int plen,
+					const unsigned char *probe_payload,
+					size_t probe_payload_len, int seq,
+					const void *dst_addr)
+{
+	int icmplen = ICMP_MINLEN + probe_payload_len;
+
+	memset(pkt, 0, sizeof(*pkt) + plen);
+	pkt->len = plen;
+
+	if (vpninfo->esp_magic_af == AF_INET6) {
+		struct ip6_hdr *iph = (void *)pkt->data;
+		struct icmp6_hdr *icmph = (void *)(pkt->data + sizeof(*iph));
+		uint32_t sum;
+
+		if (!vpninfo->ip_info.addr6)
+			return -EINVAL;
+
+		iph->ip6_flow = htonl((6 << 28) + (0 << 20) + (0 << 0));
+		iph->ip6_nxt = IPPROTO_ICMPV6;
+		iph->ip6_plen = htons(icmplen);
+		iph->ip6_hlim = 128;
+		inet_pton(AF_INET6, vpninfo->ip_info.addr6, &iph->ip6_src);
+		memcpy(&iph->ip6_dst, dst_addr, 16);
+
+		icmph->icmp6_type = ICMP6_ECHO_REQUEST;
+		icmph->icmp6_code = 0;
+		if (openconnect_random(&icmph->icmp6_data16[0], 2))
+			icmph->icmp6_data16[0] = htons(0x4747);
+		icmph->icmp6_data16[1] = htons(seq);
+		memcpy(&icmph[1], probe_payload, probe_payload_len);
+
+		sum = csum_partial(&iph->ip6_src, 8);
+		sum += csum_partial(&iph->ip6_dst, 8);
+		sum += IPPROTO_ICMPV6;
+		sum += ICMP_MINLEN + probe_payload_len;
+		sum += csum_partial(icmph, icmplen / 2);
+		icmph->icmp6_cksum = csum_finish(sum);
+	} else {
+		struct ip *iph = (void *)pkt->data;
+		struct icmp *icmph = (void *)(pkt->data + sizeof(*iph));
+		char *pmagic = (void *)(pkt->data + sizeof(*iph) + ICMP_MINLEN);
+
+		if (!vpninfo->ip_info.addr)
+			return -EINVAL;
+
+		iph->ip_hl = 5;
+		iph->ip_v = 4;
+		iph->ip_len = htons(sizeof(*iph) + icmplen);
+		iph->ip_id = htons(0x4747);
+		iph->ip_off = htons(IP_DF);
+		iph->ip_ttl = 64;
+		iph->ip_p = IPPROTO_ICMP;
+		iph->ip_src.s_addr = inet_addr(vpninfo->ip_info.addr);
+		memcpy(&iph->ip_dst.s_addr, dst_addr, 4);
+		iph->ip_sum = csum(iph, sizeof(*iph)/2);
+
+		icmph->icmp_type = ICMP_ECHO;
+		icmph->icmp_hun.ih_idseq.icd_id = htons(0x4747);
+		icmph->icmp_hun.ih_idseq.icd_seq = htons(seq);
+		memcpy(pmagic, probe_payload, probe_payload_len);
+		icmph->icmp_cksum = csum(icmph, (ICMP_MINLEN + probe_payload_len) / 2);
+	}
+
+	return 0;
+}
+
+int gpst_nlb_send_esp_keepalive(struct openconnect_info *vpninfo)
+{
+	const unsigned char *probe_payload;
+	size_t probe_payload_len;
+	unsigned char dst[16];
+	struct pkt *pkt;
+	int icmplen, plen, pktlen;
+	const char *dst_text = NULL;
+
+	if (!vpninfo->gp_nlb.enabled || vpninfo->dtls_fd < 0)
+		return 0;
+
+	probe_payload = gpst_nlb_probe_payload(&probe_payload_len);
+	icmplen = ICMP_MINLEN + probe_payload_len;
+	plen = (vpninfo->esp_magic_af == AF_INET6) ?
+		(int)(sizeof(struct ip6_hdr) + icmplen) :
+		(int)(sizeof(struct ip) + icmplen);
+
+	memset(dst, 0, sizeof(dst));
+	if (vpninfo->esp_magic_af == AF_INET &&
+	    vpninfo->gp_nlb.inner_gw_ip &&
+	    inet_pton(AF_INET, vpninfo->gp_nlb.inner_gw_ip, dst) == 1) {
+		dst_text = vpninfo->gp_nlb.inner_gw_ip;
+	} else if (vpninfo->esp_magic_af == AF_INET &&
+		   vpninfo->gp_nlb.tunnel_vip &&
+		   inet_pton(AF_INET, vpninfo->gp_nlb.tunnel_vip, dst) == 1) {
+		dst_text = vpninfo->gp_nlb.tunnel_vip;
+	} else if (vpninfo->esp_magic_af == AF_INET) {
+		memcpy(dst, vpninfo->esp_magic, 4);
+		dst_text = "ESP magic";
+	} else {
+		memcpy(dst, vpninfo->esp_magic, 16);
+		dst_text = "ESP magic";
+	}
+
+	pkt = alloc_pkt(vpninfo, plen + vpninfo->pkt_trailer +
+			gpst_nlb_pkt_slack(vpninfo));
+	if (!pkt)
+		return -ENOMEM;
+
+	if (gpst_build_icmp_probe_packet(vpninfo, pkt, plen, probe_payload,
+					 probe_payload_len,
+					 vpninfo->udp_probes_sent, dst) < 0) {
+		free_pkt(vpninfo, pkt);
+		return -EINVAL;
+	}
+
+	pktlen = construct_esp_packet(vpninfo, pkt,
+				      vpninfo->esp_magic_af == AF_INET6 ?
+				      IPPROTO_IPV6 : IPPROTO_IPIP);
+	if (pktlen < 0) {
+		free_pkt(vpninfo, pkt);
+		return pktlen;
+	}
+	if (gpst_nlb_esp_encap(vpninfo, pkt, &pktlen) < 0) {
+		free_pkt(vpninfo, pkt);
+		return -EINVAL;
+	}
+
+	vpn_progress(vpninfo, PRG_INFO,
+		     _("Send NLB ESP keepalive packet to %s: wire_len=%d\n"),
+		     dst_text ?: "unknown", pktlen);
+	if (send(vpninfo->dtls_fd, (void *)&pkt->esp, pktlen, 0) < 0) {
+		int ret = -errno;
+
+		vpn_progress(vpninfo, PRG_DEBUG,
+			     _("Failed to send NLB ESP keepalive: %s\n"),
+			     strerror(errno));
+		free_pkt(vpninfo, pkt);
+		return ret;
+	}
+	time(&vpninfo->dtls_times.last_tx);
+	free_pkt(vpninfo, pkt);
+	return 0;
+}
+
 int gpst_esp_send_probes(struct openconnect_info *vpninfo)
 {
 	/* The GlobalProtect VPN initiates and maintains the ESP connection
@@ -1791,90 +1935,11 @@ int gpst_esp_send_probes(struct openconnect_info *vpninfo)
 		vpninfo->gp_nlb.keepalive_sent = 1;
 	}
 
-	if (vpninfo->esp_magic_af == AF_INET6) {
-		memset(pkt, 0, sizeof(*pkt) + plen);
-		pkt->len = plen;
-		struct ip6_hdr *iph = (void *)pkt->data;
-		struct icmp6_hdr *icmph = (void *)(pkt->data + sizeof(*iph));
-
-		/* IPv6 Header */
-		iph->ip6_flow = htonl((6 << 28) + /* version 6 */
-				      (0 << 20) + /* traffic class; match Windows client */
-				      (0 << 0));  /* flow ID; match Windows client */
-		iph->ip6_nxt = IPPROTO_ICMPV6;
-		iph->ip6_plen = htons(icmplen);
-		iph->ip6_hlim = 128; /* what the Windows client uses */
-		inet_pton(AF_INET6, vpninfo->ip_info.addr6, &iph->ip6_src);
-		memcpy(&iph->ip6_dst, vpninfo->esp_magic, 16);
-
-		/* ICMPv6 echo request */
-		icmph->icmp6_type = ICMP6_ECHO_REQUEST;
-		icmph->icmp6_code = 0;
-		/* Windows client seemingly uses random IDs here but fall back to
-		 * 0x4747 even if only to keep Coverity happy about error checking. */
-		if (openconnect_random(&icmph->icmp6_data16[0], 2))
-			icmph->icmp6_data16[0] = htons(0x4747);
-		icmph->icmp6_data16[1] = htons(seq);            /* sequence */
-
-		/* required to get gateway to respond */
-		memcpy(&icmph[1], probe_payload, probe_payload_len);
-
-		/*
-		 * IPv6 upper-layer checksums include a pseudo-header
-		 * for IPv6 which contains the source address, the
-		 * destination address, the upper-layer packet length
-		 * and next-header field. See RFC8200 §8.1. The
-		 * checksum is as follows:
-		 *
-		 *   checksum 32 bytes of real IPv6 header:
-		 *     src addr (16 bytes)
-		 *     dst addr (16 bytes)
-		 *   8 bytes more:
-		 *     length of ICMPv6 in bytes (be32)
-		 *     3 bytes of 0
-		 *     next header byte (IPPROTO_ICMPV6)
-		 *   Then the actual ICMPv6 bytes
-		 */
-		uint32_t sum = csum_partial(&iph->ip6_src, 8);      /* 8 uint16_t */
-		sum += csum_partial(&iph->ip6_dst, 8);              /* 8 uint16_t */
-
-		/* The easiest way to checksum the following 8-byte
-		 * part of the pseudo-header without horridly violating
-		 * C type aliasing rules is *not* to build it in memory
-		 * at all. We know the length fits in 16 bits so the
-		 * partial checksum of 00 00 LL LL 00 00 00 NH ends up
-		 * being just LLLL + NH.
-		 */
-		sum += IPPROTO_ICMPV6;
-		sum += ICMP_MINLEN + probe_payload_len;
-
-		sum += csum_partial(icmph, icmplen / 2);
-		icmph->icmp6_cksum = csum_finish(sum);
-	} else {
-		memset(pkt, 0, sizeof(*pkt) + plen);
-		pkt->len = plen;
-		struct ip *iph = (void *)pkt->data;
-		struct icmp *icmph = (void *)(pkt->data + sizeof(*iph));
-		char *pmagic = (void *)(pkt->data + sizeof(*iph) + ICMP_MINLEN);
-
-		/* IP Header */
-		iph->ip_hl = 5;
-		iph->ip_v = 4;
-		iph->ip_len = htons(sizeof(*iph) + icmplen);
-		iph->ip_id = htons(0x4747); /* what the Windows client uses */
-		iph->ip_off = htons(IP_DF); /* don't fragment, frag offset = 0 */
-		iph->ip_ttl = 64; /* hops */
-		iph->ip_p = IPPROTO_ICMP;
-		iph->ip_src.s_addr = inet_addr(vpninfo->ip_info.addr);
-		memcpy(&iph->ip_dst.s_addr, vpninfo->esp_magic, 4);
-		iph->ip_sum = csum(iph, sizeof(*iph)/2);
-
-		/* ICMP echo request */
-		icmph->icmp_type = ICMP_ECHO;
-		icmph->icmp_hun.ih_idseq.icd_id = htons(0x4747);
-		icmph->icmp_hun.ih_idseq.icd_seq = htons(seq);
-		memcpy(pmagic, probe_payload, probe_payload_len); /* required to get gateway to respond */
-		icmph->icmp_cksum = csum(icmph, (ICMP_MINLEN + probe_payload_len) / 2);
+	if (gpst_build_icmp_probe_packet(vpninfo, pkt, plen, probe_payload,
+					 probe_payload_len, seq,
+					 vpninfo->esp_magic) < 0) {
+		free_pkt(vpninfo, pkt);
+		return -EINVAL;
 	}
 
 	if (vpninfo->dtls_state != DTLS_ESTABLISHED) {
