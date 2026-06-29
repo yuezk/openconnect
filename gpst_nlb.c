@@ -198,6 +198,9 @@ static int gp_nlb_decrypt_enc_hs_key(struct openconnect_info *vpninfo,
 			continue;
 		}
 
+		vpn_progress(vpninfo, PRG_DEBUG,
+			     _("Trying enc-hs-key decrypt offset %d cipher_len %d\n"),
+			     offset, cipher_len);
 		ret = gp_ssl_decrypt_blob(vpninfo, blob + offset, cipher_len,
 					  plain, &plain_len);
 		if (ret < 0) {
@@ -208,6 +211,9 @@ static int gp_nlb_decrypt_enc_hs_key(struct openconnect_info *vpninfo,
 		}
 
 		if (plain_len <= 0 || plain_len > (int)sizeof(nlb->opaque_key)) {
+			vpn_progress(vpninfo, PRG_DEBUG,
+				     _("enc-hs-key decrypt offset %d produced invalid plain_len %d\n"),
+				     offset, plain_len);
 			memset(plain, 0, sizeof(plain));
 			ret = -EINVAL;
 			continue;
@@ -259,6 +265,9 @@ static int gp_nlb_decrypt_opaque_body(struct openconnect_info *vpninfo,
 
 		payload = nlb->opaque_blob + offset;
 		out_len = payload_len;
+		vpn_progress(vpninfo, PRG_DEBUG,
+			     _("Trying tunnel-opaque decrypt offset %d cipher_len %d opaque_key_len %d\n"),
+			     offset, payload_len, nlb->opaque_key_len);
 		if (gp_ssl_decrypt_blob_key(vpninfo, nlb->opaque_key, nlb->opaque_key_len,
 					    NULL, 0, payload, payload_len, out, &out_len) < 0) {
 			vpn_progress(vpninfo, PRG_DEBUG,
@@ -365,6 +374,16 @@ int gpst_nlb_prepare(struct openconnect_info *vpninfo)
 
 	nlb->keepalive_sent = 0;
 	nlb->wire_seq = 0;
+	vpn_progress(vpninfo, PRG_INFO,
+		     _("NLB prepare: vip=%s inner_gw=%s connected_gw=%s enc_hs_key=%s tunnel_opaque=%s hs_key_len=%d refresh=%llds\n"),
+		     nlb->tunnel_vip ?: "unknown",
+		     nlb->inner_gw_ip ?: "unknown",
+		     nlb->connected_gw_ip ?: "unknown",
+		     nlb->enc_hs_key ? "present" : "missing",
+		     nlb->tunnel_opaque ? "present" : "missing",
+		     nlb->hs_key_len,
+		     (long long)(nlb->opaque_valid_until ?
+				 nlb->opaque_valid_until - time(NULL) : 0));
 
 	if (nlb->tunnel_vip && inet_pton(AF_INET, nlb->tunnel_vip, &vip) == 1) {
 		vpninfo->esp_magic_af = AF_INET;
@@ -388,12 +407,18 @@ int gpst_nlb_prepare(struct openconnect_info *vpninfo)
 			free(enc_blob);
 			return -EINVAL;
 		}
+		vpn_progress(vpninfo, PRG_DEBUG,
+			     _("Decoded enc-hs-key (%d bytes)\n"), len);
 		gp_nlb_parse_blob_header(vpninfo, enc_blob, len, nlb);
 		ret = gp_nlb_decrypt_enc_hs_key(vpninfo, nlb, enc_blob, len);
 		memset(enc_blob, 0, len);
 		free(enc_blob);
-		if (ret < 0)
+		if (ret < 0) {
+			vpn_progress(vpninfo, PRG_ERR,
+				     _("NLB prepare failed while decrypting enc-hs-key: ret=%d decoded_len=%d\n"),
+				     ret, len);
 			return ret;
+		}
 	}
 
 	if (nlb->tunnel_opaque) {
@@ -411,8 +436,12 @@ int gpst_nlb_prepare(struct openconnect_info *vpninfo)
 		if (!nlb->blob_session_id)
 			gp_nlb_parse_blob_header(vpninfo, nlb->opaque_blob, len, nlb);
 		ret = gp_nlb_decrypt_opaque_body(vpninfo, nlb);
-		if (ret < 0)
+		if (ret < 0) {
+			vpn_progress(vpninfo, PRG_ERR,
+				     _("NLB prepare failed while decrypting tunnel-opaque: ret=%d decoded_len=%d opaque_key_len=%d\n"),
+				     ret, len, nlb->opaque_key_len);
 			return ret;
+		}
 	}
 
 	if (!nlb->hs_key_len) {
@@ -466,6 +495,9 @@ int gpst_nlb_esp_encap(struct openconnect_info *vpninfo, struct pkt *pkt, int *l
 			    wire + GP_NLB_HDR_LEN, esplen) < 0)
 		return -EINVAL;
 	*len = esplen + GP_NLB_HDR_LEN;
+	vpn_progress(vpninfo, PRG_DEBUG,
+		     _("NLB wrapped ESP packet: inner_len=%d wire_len=%d\n"),
+		     esplen, *len);
 	return 0;
 }
 
@@ -765,7 +797,9 @@ int gpst_nlb_handle_ssl_connect_response(struct openconnect_info *vpninfo,
 		return -EINVAL;
 
 	if (len >= 12 && !strncmp(buf, start_tunnel, 12)) {
-		vpn_progress(vpninfo, PRG_INFO, _("NLB SSL tunnel response: START_TUNNEL\n"));
+		vpn_progress(vpninfo, PRG_INFO,
+			     _("NLB SSL tunnel response: START_TUNNEL len=%d\n"),
+			     len);
 		return gpst_nlb_on_ssl_tunnel(vpninfo);
 	}
 
