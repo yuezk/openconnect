@@ -853,6 +853,16 @@ static int gpst_parse_config_xml(struct openconnect_info *vpninfo, xmlNode *xml_
 			memcpy(vpninfo->esp_magic, &esp_magic_v4, sizeof(esp_magic_v4));
 			vpn_progress(vpninfo, PRG_INFO,
 				     _("ESP magic selected from gw-address\n"));
+		} else if (vpninfo->gp_nlb.enabled &&
+			   gpst_is_usable_ipv4(vpninfo->gp_nlb.tunnel_vip) &&
+			   new_ip_info.addr) {
+			struct in_addr nlb_vip;
+
+			inet_pton(AF_INET, vpninfo->gp_nlb.tunnel_vip, &nlb_vip);
+			vpninfo->esp_magic_af = AF_INET;
+			memcpy(vpninfo->esp_magic, &nlb_vip, sizeof(nlb_vip));
+			vpn_progress(vpninfo, PRG_INFO,
+				     _("ESP magic selected from NLB tunnel VIP\n"));
 		} else
 			goto cannot_esp;
 

@@ -414,10 +414,9 @@ int gpst_nlb_prepare(struct openconnect_info *vpninfo)
 		memset(enc_blob, 0, len);
 		free(enc_blob);
 		if (ret < 0) {
-			vpn_progress(vpninfo, PRG_ERR,
-				     _("NLB prepare failed while decrypting enc-hs-key: ret=%d decoded_len=%d\n"),
+			vpn_progress(vpninfo, PRG_INFO,
+				     _("NLB enc-hs-key decrypt unavailable: ret=%d decoded_len=%d; continuing without decrypted opaque key\n"),
 				     ret, len);
-			return ret;
 		}
 	}
 
@@ -437,10 +436,9 @@ int gpst_nlb_prepare(struct openconnect_info *vpninfo)
 			gp_nlb_parse_blob_header(vpninfo, nlb->opaque_blob, len, nlb);
 		ret = gp_nlb_decrypt_opaque_body(vpninfo, nlb);
 		if (ret < 0) {
-			vpn_progress(vpninfo, PRG_ERR,
-				     _("NLB prepare failed while decrypting tunnel-opaque: ret=%d decoded_len=%d opaque_key_len=%d\n"),
+			vpn_progress(vpninfo, PRG_INFO,
+				     _("NLB tunnel-opaque decrypt unavailable: ret=%d decoded_len=%d opaque_key_len=%d; continuing with opaque blob stored\n"),
 				     ret, len, nlb->opaque_key_len);
-			return ret;
 		}
 	}
 
@@ -449,12 +447,6 @@ int gpst_nlb_prepare(struct openconnect_info *vpninfo)
 			     _("NLB requires hs-key for envelope authentication\n"));
 		return -EINVAL;
 	}
-	if (nlb->tunnel_opaque && !nlb->opaque_body_ready) {
-		vpn_progress(vpninfo, PRG_ERR,
-			     _("NLB tunnel-opaque present but decipherment failed\n"));
-		return -EINVAL;
-	}
-
 	vpn_progress(vpninfo, PRG_INFO,
 		     _("NLB crypto ready: hs_key=%d bytes opaque_key=%d bytes opaque_body=%s refresh=%llds\n"),
 		     nlb->hs_key_len, nlb->opaque_key_len,
