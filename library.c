@@ -842,14 +842,12 @@ void openconnect_vpninfo_free(struct openconnect_info *vpninfo)
 	free(vpninfo->gp_nlb.enc_hs_key);
 	free(vpninfo->gp_nlb.tunnel_opaque);
 	free(vpninfo->gp_nlb.inner_gw_ip);
+	free(vpninfo->gp_nlb.inner_gw_ip6);
 	free(vpninfo->gp_nlb.tunnel_vip);
+	free(vpninfo->gp_nlb.tunnel_vip6);
 	free(vpninfo->gp_nlb.connected_gw_ip);
 	free(vpninfo->gp_nlb.in_tunnel_gw_cert_chksum);
-	memset(vpninfo->gp_nlb.opaque_key, 0, sizeof(vpninfo->gp_nlb.opaque_key));
-	if (vpninfo->gp_nlb.opaque_blob) {
-		memset(vpninfo->gp_nlb.opaque_blob, 0, vpninfo->gp_nlb.opaque_blob_len);
-		free(vpninfo->gp_nlb.opaque_blob);
-	}
+	memset(vpninfo->gp_nlb.hs_key, 0, sizeof(vpninfo->gp_nlb.hs_key));
 #if defined(OPENCONNECT_OPENSSL)
 	free(vpninfo->cstp_cipher);
 #if defined(HAVE_BIO_METH_FREE)

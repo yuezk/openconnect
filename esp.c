@@ -245,13 +245,19 @@ int esp_mainloop(struct openconnect_info *vpninfo, int *timeout, int readable)
 		work_done = 1;
 
 		if (vpninfo->proto->proto == PROTO_GPST && vpninfo->gp_nlb.enabled) {
-			int nlb_ret = gpst_nlb_esp_decap(vpninfo, pkt, &len);
+			int nlb_ret = gpst_nlb_handle_tunnel_response(vpninfo,
+								 (unsigned char *)&pkt->esp, len);
 
-			if (nlb_ret > 0)
+			if (nlb_ret > 0) {
+				vpninfo->dtls_times.last_rx = time(NULL);
+				vpninfo->udp_probes_sent = 0;
+				if (vpninfo->proto->udp_send_probes)
+					vpninfo->proto->udp_send_probes(vpninfo);
 				continue;
+			}
 			if (nlb_ret < 0) {
 				vpn_progress(vpninfo, PRG_INFO,
-					     _("Dropped invalid NLB ESP envelope packet\n"));
+					     _("Dropped invalid NLB tunnel-control response\n"));
 				continue;
 			}
 		}
@@ -527,14 +533,6 @@ int esp_mainloop(struct openconnect_info *vpninfo, int *timeout, int readable)
 				continue;
 			}
 
-			if (vpninfo->proto->proto == PROTO_GPST && vpninfo->gp_nlb.enabled &&
-			    gpst_nlb_esp_encap(vpninfo, this, &len) < 0) {
-				vpn_progress(vpninfo, PRG_ERR,
-					     _("Failed to NLB-wrap outbound ESP packet\n"));
-				free_pkt(vpninfo, this);
-				work_done = 1;
-				continue;
-			}
 		}
 
 		ret = send(vpninfo->dtls_fd, (void *)&this->esp, len, 0);

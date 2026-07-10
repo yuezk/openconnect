@@ -3604,186 +3604,64 @@ done:
 	return ret;
 }
 
-static gnutls_cipher_algorithm_t gp_gnutls_aes_cbc_cipher(size_t key_size)
-{
-	if (key_size == 32)
-		return GNUTLS_CIPHER_AES_256_CBC;
-	if (key_size == 24)
-		return GNUTLS_CIPHER_AES_192_CBC;
-	return GNUTLS_CIPHER_AES_128_CBC;
-}
-
-static int gp_ssl_decrypt_session_ok(struct openconnect_info *vpninfo)
-{
-	gnutls_session_t sess = vpninfo->https_sess;
-
-	if (!sess)
-		return -EINVAL;
-	if (gnutls_protocol_get_version(sess) > GNUTLS_TLS1_2) {
-		vpn_progress(vpninfo, PRG_ERR,
-			     _("NLB blob decrypt requires TLS 1.2 portal session\n"));
-		return -EINVAL;
-	}
-	return 0;
-}
-
-static int gp_aes_cbc_decrypt(const unsigned char *key, size_t key_size,
-			      const unsigned char *iv, size_t iv_size,
+int gp_nlb_aes256_gcm_encrypt(const unsigned char *key,
+			      const unsigned char *iv,
 			      const unsigned char *in, int inlen,
-			      unsigned char *out, int *outlen)
+			      unsigned char *out, unsigned char *tag)
 {
 	gnutls_cipher_hd_t hd = NULL;
-	gnutls_datum_t enc_key, iv_d;
-	unsigned char pad;
-	int err, padlen;
+	gnutls_datum_t key_d, iv_d;
+	int err;
 
-	if (!key_size || !iv_size || inlen <= 0 || (inlen % (int)iv_size))
+	if (!key || !iv || !in || inlen <= 0 || !out || !tag)
 		return -EINVAL;
 
-	enc_key.data = (unsigned char *)key;
-	enc_key.size = key_size;
+	key_d.data = (unsigned char *)key;
+	key_d.size = 32;
 	iv_d.data = (unsigned char *)iv;
-	iv_d.size = iv_size;
+	iv_d.size = 12;
+	err = gnutls_cipher_init(&hd, GNUTLS_CIPHER_AES_256_GCM, &key_d, &iv_d);
+	if (err)
+		return -EINVAL;
 
-	err = gnutls_cipher_init(&hd, gp_gnutls_aes_cbc_cipher(key_size), &enc_key, &iv_d);
+	memcpy(out, in, inlen);
+	err = gnutls_cipher_encrypt(hd, out, inlen);
+	if (!err)
+		err = gnutls_cipher_tag(hd, tag, 16);
+	gnutls_cipher_deinit(hd);
+	return err ? -EINVAL : 0;
+}
+
+int gp_nlb_aes256_gcm_decrypt(const unsigned char *key,
+			      const unsigned char *iv,
+			      const unsigned char *in, int inlen,
+			      const unsigned char *tag, unsigned char *out)
+{
+	gnutls_cipher_hd_t hd = NULL;
+	gnutls_datum_t key_d, iv_d;
+	unsigned char calculated_tag[16];
+	int err;
+
+	if (!key || !iv || !in || inlen <= 0 || !tag || !out)
+		return -EINVAL;
+
+	key_d.data = (unsigned char *)key;
+	key_d.size = 32;
+	iv_d.data = (unsigned char *)iv;
+	iv_d.size = 12;
+	err = gnutls_cipher_init(&hd, GNUTLS_CIPHER_AES_256_GCM, &key_d, &iv_d);
 	if (err)
 		return -EINVAL;
 
 	memcpy(out, in, inlen);
 	err = gnutls_cipher_decrypt(hd, out, inlen);
+	if (!err)
+		err = gnutls_cipher_tag(hd, calculated_tag, sizeof(calculated_tag));
 	gnutls_cipher_deinit(hd);
-	if (err)
-		return -EINVAL;
-
-	pad = out[inlen - 1];
-	if (pad <= 0 || pad > (int)iv_size || pad > inlen)
-		return -EINVAL;
-	for (padlen = 1; padlen <= pad; padlen++) {
-		if (out[inlen - padlen] != pad)
-			return -EINVAL;
-	}
-	*outlen = inlen - pad;
-	return 0;
-}
-
-static int gp_tls12_expand_keys(gnutls_session_t sess,
-				unsigned char *key_block, size_t key_block_len,
-				size_t *key_size, size_t *mac_size, size_t *iv_size,
-				const unsigned char **srv_key, const unsigned char **srv_iv)
-{
-	gnutls_cipher_algorithm_t cipher_algo;
-	gnutls_mac_algorithm_t mac_algo;
-	size_t needed;
-
-	cipher_algo = gnutls_cipher_get(sess);
-	mac_algo = gnutls_mac_get(sess);
-	*key_size = gnutls_cipher_get_key_size(cipher_algo);
-	*mac_size = gnutls_hmac_get_len(mac_algo);
-	*iv_size = gnutls_cipher_get_iv_size(cipher_algo);
-
-	if (!*key_size || !*mac_size || !*iv_size)
-		return -EINVAL;
-
-	needed = 2 * *mac_size + 2 * *key_size + 2 * *iv_size;
-	if (needed > key_block_len)
-		return -EINVAL;
-
-	if (gnutls_prf(sess, 13, "key expansion", 1, 0, NULL, needed,
-		       (char *)key_block) < 0)
-		return -EINVAL;
-
-	*srv_key = key_block + 2 * *mac_size + *key_size;
-	*srv_iv = key_block + 2 * *mac_size + 2 * *key_size + *iv_size;
-	return 0;
-}
-
-int gp_ssl_decrypt_blob(struct openconnect_info *vpninfo,
-			const unsigned char *in, int inlen,
-			unsigned char *out, int *outlen)
-{
-	gnutls_session_t sess = vpninfo->https_sess;
-	unsigned char key_block[128];
-	size_t key_size, mac_size, iv_size;
-	const unsigned char *srv_key, *srv_iv;
-
-	if (!sess || !in || inlen <= 0 || !out || !outlen)
-		return -EINVAL;
-
-	if (gp_ssl_decrypt_session_ok(vpninfo) < 0)
-		return -EINVAL;
-
-	if (gp_tls12_expand_keys(sess, key_block, sizeof(key_block),
-				 &key_size, &mac_size, &iv_size,
-				 &srv_key, &srv_iv) < 0)
-		return -EINVAL;
-
-	return gp_aes_cbc_decrypt(srv_key, key_size, srv_iv, iv_size,
-				  in, inlen, out, outlen);
-}
-
-int gp_ssl_decrypt_blob_key(struct openconnect_info *vpninfo,
-			    const unsigned char *key, int key_len,
-			    const unsigned char *iv, int iv_len,
-			    const unsigned char *in, int inlen,
-			    unsigned char *out, int *outlen)
-{
-	gnutls_session_t sess = vpninfo->https_sess;
-	unsigned char key_block[128];
-	size_t key_size, mac_size, iv_size;
-	const unsigned char *srv_key, *srv_iv;
-	const unsigned char *use_key, *use_iv;
-
-	if (!sess || !key || key_len <= 0 || !in || inlen <= 0 || !out || !outlen)
-		return -EINVAL;
-
-	if (gp_ssl_decrypt_session_ok(vpninfo) < 0)
-		return -EINVAL;
-
-	if (gp_tls12_expand_keys(sess, key_block, sizeof(key_block),
-				 &key_size, &mac_size, &iv_size,
-				 &srv_key, &srv_iv) < 0)
-		return -EINVAL;
-
-	use_key = key;
-	use_iv = srv_iv;
-	key_size = key_len;
-	iv_size = gnutls_cipher_get_iv_size(gnutls_cipher_get(sess));
-
-	if (iv && iv_len > 0) {
-		use_iv = iv;
-		iv_size = iv_len;
-	}
-
-	if (key_len != 16 && key_len != 24 && key_len != 32)
-		return -EINVAL;
-
-	return gp_aes_cbc_decrypt(use_key, key_size, use_iv, iv_size,
-				  in, inlen, out, outlen);
-}
-
-int gp_nlb_hmac_sha1(const unsigned char *key, int key_len,
-		     const unsigned char *data1, int len1,
-		     const unsigned char *data2, int len2,
-		     unsigned char *out)
-{
-	gnutls_hmac_hd_t hd;
-
-	if (!key || key_len <= 0 || !data1 || len1 < 0 || !out)
-		return -EINVAL;
-	if (len2 < 0 || (len2 > 0 && !data2))
-		return -EINVAL;
-
-	if (gnutls_hmac_init(&hd, GNUTLS_MAC_SHA1, key, key_len) < 0)
-		return -EINVAL;
-	if (gnutls_hmac(hd, data1, len1) < 0) {
-		gnutls_hmac_deinit(hd, NULL);
+	if (err || memcmp(calculated_tag, tag, sizeof(calculated_tag))) {
+		memset(calculated_tag, 0, sizeof(calculated_tag));
 		return -EINVAL;
 	}
-	if (len2 > 0 && gnutls_hmac(hd, data2, len2) < 0) {
-		gnutls_hmac_deinit(hd, NULL);
-		return -EINVAL;
-	}
-	gnutls_hmac_output(hd, out);
-	gnutls_hmac_deinit(hd, NULL);
+	memset(calculated_tag, 0, sizeof(calculated_tag));
 	return 0;
 }

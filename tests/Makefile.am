@@ -87,12 +87,11 @@ endif
 dist_check_SCRIPTS += auth-username-pass auth-certificate auth-nonascii cert-fingerprint \
 	id-test obsolete-server-crypto pfs auth-swtpm auth-hwtpm fortinet-auth-and-config \
 	f5-auth-and-config juniper-auth juniper-sso-auth gp-auth-and-config auth-pkcs11 \
-	auth-multicert gp-nlb-ssl-parse gp-nlb-esp-envelope gp-nlb-ssl-connect \
-	gp-nlb-opaque-due gp-nlb-auth-and-config gp-esp-gcm-roundtrip gp-nlb-blob-parse \
-	gp-nlb-opaque-auth
+	auth-multicert gp-nlb-ssl-parse gp-nlb-ssl-connect \
+	gp-nlb-opaque-due gp-nlb-auth-and-config gp-esp-gcm-roundtrip gp-nlb-control
 
-TESTS += gp-nlb-ssl-parse gp-nlb-esp-envelope gp-nlb-ssl-connect gp-nlb-opaque-due \
-	gp-esp-gcm-roundtrip gp-nlb-blob-parse gp-nlb-opaque-auth
+TESTS += gp-nlb-ssl-parse gp-nlb-ssl-connect gp-nlb-opaque-due \
+	gp-esp-gcm-roundtrip gp-nlb-control
 
 if HAVE_CWRAP
 TESTS += auth-username-pass auth-certificate auth-nonascii cert-fingerprint id-test \

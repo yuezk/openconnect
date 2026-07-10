@@ -394,22 +394,19 @@ struct openconnect_info;
 struct gp_nlb_config {
 	int enabled;
 	unsigned char hs_key[32];
-	int hs_key_bits;
 	int hs_key_len;
 	char *enc_hs_key;
 	char *tunnel_opaque;
 	time_t opaque_valid_until;
 	char *inner_gw_ip;
+	char *inner_gw_ip6;
 	char *tunnel_vip;
+	char *tunnel_vip6;
 	char *connected_gw_ip;
 	char *in_tunnel_gw_cert_chksum;
-	unsigned char *opaque_blob;
-	int opaque_blob_len;
-	int opaque_body_ready;
-	uint32_t blob_session_id;
-	unsigned char opaque_key[48];
-	int opaque_key_len;
-	uint16_t wire_seq;
+	int control_state;
+	time_t control_last_sent;
+	unsigned int control_requests;
 	int keepalive_sent;
 };
 
@@ -1437,14 +1434,15 @@ int gpst_xml_or_error(struct openconnect_info *vpninfo, char *response,
 					  void *cb_data);
 int gpst_setup(struct openconnect_info *vpninfo);
 int gpst_nlb_prepare(struct openconnect_info *vpninfo);
-int gpst_nlb_pkt_slack(struct openconnect_info *vpninfo);
 const unsigned char *gpst_nlb_probe_payload(size_t *len);
 int gpst_nlb_send_esp_keepalive(struct openconnect_info *vpninfo);
-int gpst_nlb_esp_encap(struct openconnect_info *vpninfo, struct pkt *pkt, int *len);
-int gpst_nlb_esp_decap(struct openconnect_info *vpninfo, struct pkt *pkt, int *len);
+int gpst_nlb_control_ready(struct openconnect_info *vpninfo);
+int gpst_nlb_send_tunnel_request(struct openconnect_info *vpninfo);
+int gpst_nlb_handle_tunnel_response(struct openconnect_info *vpninfo,
+				    const unsigned char *buf, int len);
 int gpst_nlb_parse_ssl_response(const char *buf, int len, struct gp_nlb_config *nlb);
 int gpst_nlb_apply_routes(struct openconnect_info *vpninfo);
-int gpst_nlb_on_ssl_tunnel(struct openconnect_info *vpninfo);
+int gpst_nlb_apply_tunnel_config(struct openconnect_info *vpninfo);
 int gpst_nlb_handle_ssl_connect_response(struct openconnect_info *vpninfo,
 					 const char *buf, int len);
 int gpst_nlb_refresh_opaque(struct openconnect_info *vpninfo);
@@ -1573,20 +1571,15 @@ static inline void esp_gcm_nonce(unsigned char *nonce,
 	memcpy(nonce + ESP_GCM_SALT_LEN, iv, ESP_GCM_IV_LEN);
 }
 
-int gp_ssl_decrypt_blob(struct openconnect_info *vpninfo,
-			const unsigned char *in, int inlen,
-			unsigned char *out, int *outlen);
-int gp_ssl_decrypt_blob_key(struct openconnect_info *vpninfo,
-			     const unsigned char *key, int key_len,
-			     const unsigned char *iv, int iv_len,
-			     const unsigned char *in, int inlen,
-			     unsigned char *out, int *outlen);
-int gp_nlb_hmac_sha1(const unsigned char *key, int key_len,
-		     const unsigned char *data1, int len1,
-		     const unsigned char *data2, int len2,
-		     unsigned char *out);
-
 /* {gnutls,openssl}.c */
+int gp_nlb_aes256_gcm_encrypt(const unsigned char *key,
+			      const unsigned char *iv,
+			      const unsigned char *in, int inlen,
+			      unsigned char *out, unsigned char *tag);
+int gp_nlb_aes256_gcm_decrypt(const unsigned char *key,
+			      const unsigned char *iv,
+			      const unsigned char *in, int inlen,
+			      const unsigned char *tag, unsigned char *out);
 const char *openconnect_get_tls_library_version(void);
 int can_enable_insecure_crypto(void);
 int ssl_nonblock_read(struct openconnect_info *vpninfo, int dtls, void *buf, int maxlen);

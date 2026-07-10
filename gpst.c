@@ -488,21 +488,6 @@ static int gpst_replace_str(char **dst, const char *src)
 	return 0;
 }
 
-static int gpst_copy_str(char **dst, const char *src)
-{
-	char *dup = NULL;
-
-	if (src) {
-		dup = strdup(src);
-		if (!dup)
-			return -ENOMEM;
-	}
-
-	free(*dst);
-	*dst = dup;
-	return 0;
-}
-
 static void gpst_parse_nlb_tunnel_opaque(struct openconnect_info *vpninfo,
 					 xmlNode *xml_node)
 {
@@ -535,9 +520,6 @@ static int gpst_parse_config_xml(struct openconnect_info *vpninfo, xmlNode *xml_
 	char *s = NULL;
 	char *nlb_ip_candidate = NULL;
 	char *nlb_gw_candidate = NULL;
-	char *nlb_raw_gw_addr = NULL;
-	char *nlb_raw_ip_addr = NULL;
-	char *nlb_raw_default_gw = NULL;
 	int ii;
 
 #ifdef HAVE_ESP
@@ -559,8 +541,6 @@ static int gpst_parse_config_xml(struct openconnect_info *vpninfo, xmlNode *xml_
 	/* Parse config */
 	for (xml_node = xml_node->children; xml_node; xml_node=xml_node->next) {
 		if (!xmlnode_get_val(xml_node, "ip-address", &s)) {
-			if ((ret = gpst_copy_str(&nlb_raw_ip_addr, s)))
-				goto err;
 			if ((ret = gpst_replace_str(&nlb_ip_candidate, s)))
 				goto err;
 			new_ip_info.addr = add_option_steal(&new_opts, "ipaddr", &s);
@@ -606,8 +586,6 @@ static int gpst_parse_config_xml(struct openconnect_info *vpninfo, xmlNode *xml_
 			vpninfo->ssl_times.rekey = sec - 60;
 			vpninfo->ssl_times.rekey_method = REKEY_TUNNEL;
 		} else if (!xmlnode_get_val(xml_node, "gw-address", &s)) {
-			if ((ret = gpst_copy_str(&nlb_raw_gw_addr, s)))
-				goto err;
 			/* As remarked in oncp.c, "this is a tunnel; having a
 			 * gateway is meaningless." See esp_send_probes_gp for the
 			 * gory details of what this field actually means.
@@ -713,7 +691,7 @@ static int gpst_parse_config_xml(struct openconnect_info *vpninfo, xmlNode *xml_
 				}
 				if (esp_uses_gcm(vpninfo) && !vpninfo->esp_hmac)
 					vpninfo->esp_hmac = HMAC_NONE;
-				vpn_progress(vpninfo, PRG_INFO,
+				vpn_progress(vpninfo, PRG_DEBUG,
 					     _("ESP config summary: enc=%s(%d) hmac=%s(%d) enc_key_len=%d hmac_key_len=%d gcm_icv=%d c2s_spi=0x%08x s2c_spi=0x%08x\n"),
 					     gpst_esp_enc_name(vpninfo->esp_enc), vpninfo->esp_enc,
 					     gpst_esp_hmac_name(vpninfo->esp_hmac), vpninfo->esp_hmac,
@@ -734,7 +712,6 @@ static int gpst_parse_config_xml(struct openconnect_info *vpninfo, xmlNode *xml_
 			int keylen = xml_to_key(xml_node, vpninfo->gp_nlb.hs_key, sizeof(vpninfo->gp_nlb.hs_key));
 			if (keylen > 0) {
 				vpninfo->gp_nlb.hs_key_len = keylen;
-				vpninfo->gp_nlb.hs_key_bits = keylen * 8;
 				vpninfo->gp_nlb.enabled = 1;
 			}
 #endif /* HAVE_ESP */
@@ -748,8 +725,6 @@ static int gpst_parse_config_xml(struct openconnect_info *vpninfo, xmlNode *xml_
 		} else if (!xmlnode_get_val(xml_node, "valid-period", &s)) {
 			vpninfo->gp_nlb.opaque_valid_until = time(NULL) + atol(s);
 		} else if (!xmlnode_get_val(xml_node, "default-gateway", &s)) {
-			if ((ret = gpst_copy_str(&nlb_raw_default_gw, s)))
-				goto err;
 			if ((ret = gpst_replace_str(&nlb_gw_candidate, s)))
 				goto err;
 		} else if (!xmlnode_get_val(xml_node, "in-tunnel-gw-cert-chksum", &s)) {
@@ -801,15 +776,6 @@ static int gpst_parse_config_xml(struct openconnect_info *vpninfo, xmlNode *xml_
 			     vpninfo->gp_nlb.connected_gw_ip ?: "unknown",
 			     (long long)(vpninfo->gp_nlb.opaque_valid_until ?
 					 vpninfo->gp_nlb.opaque_valid_until - time(NULL) : 0));
-		vpn_progress(vpninfo, PRG_INFO,
-			     _("NLB config address summary: gw-address=%s usable=%s ip-address=%s usable=%s default-gateway=%s usable=%s selected_vip=%s\n"),
-			     nlb_raw_gw_addr ?: "missing",
-			     gpst_is_usable_ipv4(nlb_raw_gw_addr) ? "yes" : "no",
-			     nlb_raw_ip_addr ?: "missing",
-			     gpst_is_usable_ipv4(nlb_raw_ip_addr) ? "yes" : "no",
-			     nlb_raw_default_gw ?: "missing",
-			     gpst_is_usable_ipv4(nlb_raw_default_gw) ? "yes" : "no",
-			     vpninfo->gp_nlb.tunnel_vip ?: "none");
 	} else
 		vpn_progress(vpninfo, PRG_DEBUG,
 			     _("hs-key section is not specified. Non-nlb\n"));
@@ -826,7 +792,7 @@ static int gpst_parse_config_xml(struct openconnect_info *vpninfo, xmlNode *xml_
 			     _("GlobalProtect IPv6 support is experimental. Please report results to <%s>.\n"),
 			     "openconnect-devel@lists.infradead.org");
 #ifdef HAVE_ESP
-	vpn_progress(vpninfo, PRG_INFO,
+	vpn_progress(vpninfo, PRG_DEBUG,
 		     _("ESP setup decision: esp_keys=%s have_magic_v4=%s have_magic_v6=%s client_ipv4=%s client_ipv6=%s nlb_enabled=%s nlb_vip=%s dtls_state=%d\n"),
 		     esp_keys ? "yes" : "no",
 		     have_esp_magic_v4 ? "yes" : "no",
@@ -862,7 +828,7 @@ static int gpst_parse_config_xml(struct openconnect_info *vpninfo, xmlNode *xml_
 			vpninfo->esp_magic_af = AF_INET;
 			memcpy(vpninfo->esp_magic, &nlb_vip, sizeof(nlb_vip));
 			vpn_progress(vpninfo, PRG_INFO,
-				     _("ESP magic selected from NLB tunnel VIP\n"));
+				     _("ESP magic initialized from NLB virtual IP pending tunnel control\n"));
 		} else
 			goto cannot_esp;
 
@@ -882,20 +848,13 @@ cannot_esp:
 	free(s);
 	free(nlb_ip_candidate);
 	free(nlb_gw_candidate);
-	free(nlb_raw_gw_addr);
-	free(nlb_raw_ip_addr);
-	free(nlb_raw_default_gw);
 	nlb_ip_candidate = nlb_gw_candidate = NULL;
-	nlb_raw_gw_addr = nlb_raw_ip_addr = nlb_raw_default_gw = NULL;
 
 	ret = install_vpn_opts(vpninfo, new_opts, &new_ip_info);
 	if (ret) {
 	err:
 		free(nlb_ip_candidate);
 		free(nlb_gw_candidate);
-		free(nlb_raw_gw_addr);
-		free(nlb_raw_ip_addr);
-		free(nlb_raw_default_gw);
 		free_optlist(new_opts);
 		free_split_routes(&new_ip_info);
 	}
@@ -941,7 +900,6 @@ static int gpst_parse_nlb_opaque_xml(struct openconnect_info *vpninfo, xmlNode *
 
 			if (keylen > 0) {
 				vpninfo->gp_nlb.hs_key_len = keylen;
-				vpninfo->gp_nlb.hs_key_bits = keylen * 8;
 				vpninfo->gp_nlb.enabled = 1;
 			}
 #endif /* HAVE_ESP */
@@ -1935,8 +1893,7 @@ int gpst_nlb_send_esp_keepalive(struct openconnect_info *vpninfo)
 		dst_text = "ESP magic";
 	}
 
-	pkt = alloc_pkt(vpninfo, plen + vpninfo->pkt_trailer +
-			gpst_nlb_pkt_slack(vpninfo));
+	pkt = alloc_pkt(vpninfo, plen + vpninfo->pkt_trailer);
 	if (!pkt)
 		return -ENOMEM;
 
@@ -1954,12 +1911,7 @@ int gpst_nlb_send_esp_keepalive(struct openconnect_info *vpninfo)
 		free_pkt(vpninfo, pkt);
 		return pktlen;
 	}
-	if (gpst_nlb_esp_encap(vpninfo, pkt, &pktlen) < 0) {
-		free_pkt(vpninfo, pkt);
-		return -EINVAL;
-	}
-
-	vpn_progress(vpninfo, PRG_INFO,
+	vpn_progress(vpninfo, PRG_DEBUG,
 		     _("Send NLB ESP keepalive packet to %s: wire_len=%d\n"),
 		     dst_text ?: "unknown", pktlen);
 	if (send(vpninfo->dtls_fd, (void *)&pkt->esp, pktlen, 0) < 0) {
@@ -2015,8 +1967,7 @@ int gpst_esp_send_probes(struct openconnect_info *vpninfo)
 		plen = sizeof(struct ip6_hdr) + icmplen;
 	else
 		plen = sizeof(struct ip) + icmplen;
-	struct pkt *pkt = alloc_pkt(vpninfo, plen + vpninfo->pkt_trailer +
-				    gpst_nlb_pkt_slack(vpninfo));
+	struct pkt *pkt = alloc_pkt(vpninfo, plen + vpninfo->pkt_trailer);
 	if (!pkt)
 		return -ENOMEM;
 
@@ -2034,9 +1985,20 @@ int gpst_esp_send_probes(struct openconnect_info *vpninfo)
 		monitor_except_fd(vpninfo, dtls);
 	}
 
+	if (vpninfo->gp_nlb.enabled && !gpst_nlb_control_ready(vpninfo)) {
+		int ret = gpst_nlb_send_tunnel_request(vpninfo);
+
+		free_pkt(vpninfo, pkt);
+		if (ret < 0)
+			vpn_progress(vpninfo, PRG_ERR,
+				     _("Failed to send NLB tunnel-control request: %s\n"),
+				     strerror(-ret));
+		return ret;
+	}
+
 	if (vpninfo->gp_nlb.enabled && !vpninfo->gp_nlb.keepalive_sent) {
-		gpst_nlb_send_esp_keepalive(vpninfo);
-		vpninfo->gp_nlb.keepalive_sent = 1;
+		if (gpst_nlb_send_esp_keepalive(vpninfo) >= 0)
+			vpninfo->gp_nlb.keepalive_sent = 1;
 	}
 
 	if (gpst_build_icmp_probe_packet(vpninfo, pkt, plen, probe_payload,
@@ -2061,9 +2023,7 @@ int gpst_esp_send_probes(struct openconnect_info *vpninfo)
 			vpn_progress(vpninfo, PRG_TRACE, _("ESP probe wire packet (%d bytes):\n"), pktlen);
 			dump_buf_hex(vpninfo, PRG_TRACE, '>', (void *)&pkt->esp, pktlen);
 		}
-		if (vpninfo->gp_nlb.enabled && gpst_nlb_esp_encap(vpninfo, pkt, &pktlen) < 0)
-			vpn_progress(vpninfo, PRG_ERR, _("Failed to NLB-wrap ESP probe\n"));
-		else if (send(vpninfo->dtls_fd, (void *)&pkt->esp, pktlen, 0) < 0)
+		if (send(vpninfo->dtls_fd, (void *)&pkt->esp, pktlen, 0) < 0)
 			vpn_progress(vpninfo, PRG_DEBUG, _("Failed to send ESP probe\n"));
 	}
 
