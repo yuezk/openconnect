@@ -1,5 +1,5 @@
 #!/bin/sh
-# Validate the GlobalProtect NLB GPTC request and encrypted CTPG response wire format.
+# Validate the GlobalProtect NLB GPTC request and encrypted response wire format.
 set -eu
 BUILD_CONFIG=""
 if test -n "${top_builddir:-}"; then
@@ -37,7 +37,9 @@ cat > "$TMP/test.c" <<'EOF'
 #include <stdio.h>
 #include <string.h>
 
-#define HEADER_LEN 17
+#include "gpst_nlb.h"
+
+#define HEADER_LEN GP_NLB_CONTROL_HEADER_LEN
 #define TOC_LEN 5
 #define TAG_LEN 16
 #define IV_LEN 12
@@ -257,12 +259,15 @@ static int check_response(void)
 	memcpy(block + TAG_LEN + IV_LEN, cipher, sizeof(xml));
 	encoded_len = base64_encode(block, sizeof(block), encoded);
 
-	memcpy(response + 4, "CTPG", 4);
+	/* The issue #526 gateway replies with the zero-prefixed GPTC framing
+	 * accepted by PanGPS, rather than the alternate CTPG marker. */
+	memcpy(response + 4, "GPTC", 4);
 	response[16] = 1;
 	set_toc(response + HEADER_LEN, 4, HEADER_LEN + TOC_LEN, encoded_len);
 	memcpy(response + HEADER_LEN + TOC_LEN, encoded, encoded_len);
 
-	if (memcmp(response + 4, "CTPG", 4) || response[16] != 1 ||
+	if (!gp_nlb_is_tunnel_response(response, sizeof(response)) ||
+	    memcmp(response + 4, "GPTC", 4) || response[16] != 1 ||
 	    response[17] != 4 || load_be16(response + 18) != HEADER_LEN + TOC_LEN ||
 	    load_be16(response + 20) != encoded_len)
 		return -1;
@@ -276,6 +281,29 @@ static int check_response(void)
 	return 0;
 }
 
+static int check_response_headers(void)
+{
+	unsigned char header[HEADER_LEN] = { 0 };
+
+	memcpy(header + 4, "GPTC", 4);
+	if (!gp_nlb_is_tunnel_response(header, sizeof(header)))
+		return -1;
+
+	header[3] = 1;
+	if (gp_nlb_is_tunnel_response(header, sizeof(header)))
+		return -1;
+	memcpy(header + 4, "CTPG", 4);
+	if (!gp_nlb_is_tunnel_response(header, sizeof(header)))
+		return -1;
+
+	header[3] = 0;
+	memcpy(header + 4, "NONE", 4);
+	if (!gp_nlb_is_tunnel_response(header, sizeof(header)) ||
+	    gp_nlb_is_tunnel_response(header, HEADER_LEN - 1))
+		return -1;
+	return 0;
+}
+
 int main(void)
 {
 	if (check_request()) {
@@ -283,7 +311,11 @@ int main(void)
 		return 1;
 	}
 	if (check_response()) {
-		fprintf(stderr, "CTPG response crypto/layout mismatch\n");
+		fprintf(stderr, "NLB response crypto/layout mismatch\n");
+		return 1;
+	}
+	if (check_response_headers()) {
+		fprintf(stderr, "NLB response header recognition mismatch\n");
 		return 1;
 	}
 	puts("gp-nlb-control: OK");
@@ -291,5 +323,5 @@ int main(void)
 }
 EOF
 
-$CC $CFLAGS -o "$TMP/test" "$TMP/test.c" $LIBS
+$CC $CFLAGS -I. -o "$TMP/test" "$TMP/test.c" $LIBS
 "$TMP/test"

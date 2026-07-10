@@ -7,9 +7,9 @@
  *   1. getconfig.esp returns hs-key, enc-hs-key, and tunnel-opaque.
  *   2. The client sends a GPTC control packet containing the two opaque
  *      values, encrypted preferred-address data, and a fixed client hash.
- *   3. The gateway returns a CTPG packet. Its type-4 field contains
- *      base64(tag[16] || iv[12] || AES-256-GCM ciphertext), encrypted with
- *      the clear hs-key from getconfig.esp.
+ *   3. The gateway returns a zero-prefixed or CTPG packet. Its type-4 field
+ *      contains base64(tag[16] || iv[12] || AES-256-GCM ciphertext),
+ *      encrypted with the clear hs-key from getconfig.esp.
  *   4. The decrypted XML supplies the client virtual IP and private gateway.
  *   5. ESP keepalives, probes, and data are sent directly on the UDP socket.
  *
@@ -26,9 +26,9 @@
 #include <ctype.h>
 
 #include "openconnect-internal.h"
+#include "gpst_nlb.h"
 
 #define GP_NLB_CONTROL_MAX		2048
-#define GP_NLB_CONTROL_HEADER_LEN	17
 #define GP_NLB_TOC_ENTRY_LEN		5
 #define GP_NLB_TOC_COUNT		4
 #define GP_NLB_BLOCK_ENC_HS_KEY		1
@@ -38,16 +38,26 @@
 #define GP_NLB_GCM_TAG_LEN		16
 #define GP_NLB_GCM_IV_LEN		12
 #define GP_NLB_GCM_PREFIX_LEN		(GP_NLB_GCM_TAG_LEN + GP_NLB_GCM_IV_LEN)
+#define GP_NLB_MAX_DNS			3
+#define GP_NLB_MAX_WINS			2
 
 #define GP_NLB_CONTROL_PENDING		1
 #define GP_NLB_CONTROL_WAITING		2
 #define GP_NLB_CONTROL_READY		3
+#define GP_NLB_CONTROL_RESTORING	4
+#define GP_NLB_CONTROL_FAILED		5
+#define GP_NLB_CONTROL_MAX_REQUESTS	3
+#define GP_NLB_RESTORE_WAIT		2
 
-#define GP_NLB_SSL_PROTO_VERSION	110
-#define GP_NLB_OPAQUE_REFRESH_MARGIN	60
+#define GP_NLB_SSL_IPV4_VIP_OFFSET	4
+#define GP_NLB_SSL_IPV4_GW_OFFSET	19
+#define GP_NLB_SSL_IPV4_FIELD_LEN	15
+#define GP_NLB_SSL_IPV6_RESPONSE_LEN	188
+#define GP_NLB_SSL_IPV6_VIP_OFFSET	98
+#define GP_NLB_SSL_IPV6_GW_OFFSET	137
+#define GP_NLB_SSL_IPV6_FIELD_LEN	39
 
 static const unsigned char gp_nlb_request_magic[4] = { 'G', 'P', 'T', 'C' };
-static const unsigned char gp_nlb_response_magic[4] = { 'C', 'T', 'P', 'G' };
 static const char gp_nlb_client_hash[] =
 	"75cd47bf39517f376924a519c2355292a26ce63fd04eca117fb566aa0a222b41";
 
@@ -61,10 +71,14 @@ struct gp_nlb_tunnel_info {
 	char *vip6;
 	char *inner_gw;
 	char *inner_gw6;
-	char *dns[3];
-	char *wins[3];
+	char *dns[GP_NLB_MAX_DNS];
+	char *wins[GP_NLB_MAX_WINS];
 	int nr_dns;
 	int nr_wins;
+	int dns_present;
+	int wins_present;
+	int dns_v6;
+	int wins_v6;
 };
 
 static int gp_nlb_is_ipv4(const char *s)
@@ -72,48 +86,6 @@ static int gp_nlb_is_ipv4(const char *s)
 	struct in_addr a;
 
 	return s && inet_pton(AF_INET, s, &a) == 1;
-}
-
-static int gp_nlb_split_concat_ips(const char *concat, const char *hint_vip,
-				     char **vip, char **inner)
-{
-	size_t concat_len, i, vip_len;
-
-	if (!concat || !*concat)
-		return -EINVAL;
-	concat_len = strlen(concat);
-
-	if (hint_vip && !strncmp(concat, hint_vip, strlen(hint_vip))) {
-		vip_len = strlen(hint_vip);
-		if (concat[vip_len] && gp_nlb_is_ipv4(concat + vip_len)) {
-			STRDUP(*vip, hint_vip);
-			STRDUP(*inner, concat + vip_len);
-			return 0;
-		}
-	}
-
-	for (i = 1; i < concat_len && i <= 15; i++) {
-		char candidate[16];
-
-		if (concat_len - i > 15)
-			continue;
-		memcpy(candidate, concat, i);
-		candidate[i] = '\0';
-		if (!gp_nlb_is_ipv4(candidate) || !gp_nlb_is_ipv4(concat + i))
-			continue;
-
-		*vip = strdup(candidate);
-		*inner = strdup(concat + i);
-		if (!*vip || !*inner) {
-			free(*vip);
-			free(*inner);
-			*vip = *inner = NULL;
-			return -ENOMEM;
-		}
-		return 0;
-	}
-
-	return -EINVAL;
 }
 
 int gpst_nlb_prepare(struct openconnect_info *vpninfo)
@@ -125,9 +97,10 @@ int gpst_nlb_prepare(struct openconnect_info *vpninfo)
 		return 0;
 
 	nlb->control_state = GP_NLB_CONTROL_PENDING;
-	nlb->control_last_sent = 0;
+	nlb->last_nlb_send = 0;
 	nlb->control_requests = 0;
 	nlb->keepalive_sent = 0;
+	nlb->keepalive_seq = 0;
 
 	if (nlb->tunnel_vip && inet_pton(AF_INET, nlb->tunnel_vip, &vip) == 1) {
 		vpninfo->esp_magic_af = AF_INET;
@@ -147,7 +120,7 @@ int gpst_nlb_prepare(struct openconnect_info *vpninfo)
 	}
 
 	vpn_progress(vpninfo, PRG_DEBUG,
-		     _("NLB tunnel control ready: vip=%s connected_gw=%s hs_key=%d bytes enc_hs_key=%zu bytes tunnel_opaque=%zu bytes refresh=%llds\n"),
+		     _("NLB tunnel control ready: vip=%s connected_gw=%s hs_key=%d bytes enc_hs_key=%zu bytes tunnel_opaque=%zu bytes opaque_valid_for=%llds\n"),
 		     nlb->tunnel_vip ?: "unknown",
 		     nlb->connected_gw_ip ?: "unknown",
 		     nlb->hs_key_len, strlen(nlb->enc_hs_key),
@@ -329,13 +302,22 @@ int gpst_nlb_send_tunnel_request(struct openconnect_info *vpninfo)
 	time_t now = time(NULL);
 	int len, ret;
 
-	if (!nlb->enabled || nlb->control_state == GP_NLB_CONTROL_READY)
+	if (!nlb->enabled || nlb->control_state == GP_NLB_CONTROL_READY ||
+	    nlb->control_state == GP_NLB_CONTROL_RESTORING ||
+	    nlb->control_state == GP_NLB_CONTROL_FAILED)
 		return 0;
 	if (vpninfo->dtls_fd < 0)
 		return -EINVAL;
 	if (nlb->control_state == GP_NLB_CONTROL_WAITING &&
-	    nlb->control_last_sent == now)
+	    nlb->last_nlb_send == now)
 		return 0;
+	if (nlb->control_requests >= GP_NLB_CONTROL_MAX_REQUESTS) {
+		nlb->control_state = GP_NLB_CONTROL_FAILED;
+		vpn_progress(vpninfo, PRG_ERR,
+			     _("NLB tunnel-control failed: no valid response after %u requests\n"),
+			     nlb->control_requests);
+		return 0;
+	}
 
 	len = gp_nlb_build_tunnel_request(vpninfo, request, sizeof(request));
 	if (len < 0)
@@ -345,13 +327,101 @@ int gpst_nlb_send_tunnel_request(struct openconnect_info *vpninfo)
 		return ret < 0 ? -errno : -EIO;
 
 	nlb->control_state = GP_NLB_CONTROL_WAITING;
-	nlb->control_last_sent = now;
+	nlb->last_nlb_send = now;
 	nlb->control_requests++;
 	time(&vpninfo->dtls_times.last_tx);
 	vpn_progress(vpninfo, PRG_DEBUG,
 		     _("Sent NLB tunnel-control request %u (%d bytes)\n"),
 		     nlb->control_requests, len);
 	return 0;
+}
+
+#ifdef HAVE_ESP
+int gpst_nlb_restore(struct openconnect_info *vpninfo)
+{
+	struct gp_nlb_config *nlb = &vpninfo->gp_nlb;
+	time_t now = time(NULL);
+	int ret;
+
+	if (!nlb->enabled || nlb->control_state != GP_NLB_CONTROL_RESTORING)
+		return 0;
+
+	if (!nlb->last_nlb_send) {
+		ret = gpst_nlb_send_esp_keepalive(vpninfo);
+		if (ret < 0) {
+			vpn_progress(vpninfo, PRG_DEBUG,
+				     _("NLB restoration keepalive failed; restarting tunnel control\n"));
+			nlb->control_state = GP_NLB_CONTROL_PENDING;
+			nlb->control_requests = 0;
+			return 0;
+		}
+		nlb->last_nlb_send = now;
+		vpn_progress(vpninfo, PRG_DEBUG,
+			     _("Sent NLB restoration keepalive; waiting %d seconds for ESP response\n"),
+			     GP_NLB_RESTORE_WAIT);
+		return 1;
+	}
+
+	if (now < nlb->last_nlb_send + GP_NLB_RESTORE_WAIT)
+		return 1;
+
+	vpn_progress(vpninfo, PRG_INFO,
+		     _("NLB restoration keepalive timed out; restarting tunnel control\n"));
+	nlb->control_state = GP_NLB_CONTROL_PENDING;
+	nlb->last_nlb_send = 0;
+	nlb->control_requests = 0;
+	return 0;
+}
+
+void gpst_nlb_udp_closed(struct openconnect_info *vpninfo)
+{
+	struct gp_nlb_config *nlb = &vpninfo->gp_nlb;
+
+	if (!nlb->enabled)
+		return;
+
+	if (nlb->control_state == GP_NLB_CONTROL_READY) {
+		nlb->control_state = GP_NLB_CONTROL_RESTORING;
+		vpn_progress(vpninfo, PRG_DEBUG,
+			     _("NLB UDP socket closed; restoration will try ESP before tunnel control\n"));
+	} else if (nlb->control_state != GP_NLB_CONTROL_RESTORING) {
+		nlb->control_state = GP_NLB_CONTROL_PENDING;
+	}
+	nlb->last_nlb_send = 0;
+	nlb->control_requests = 0;
+	nlb->keepalive_sent = 0;
+}
+
+void gpst_nlb_restore_complete(struct openconnect_info *vpninfo)
+{
+	struct gp_nlb_config *nlb = &vpninfo->gp_nlb;
+
+	if (!nlb->enabled || nlb->control_state != GP_NLB_CONTROL_RESTORING)
+		return;
+	nlb->control_state = GP_NLB_CONTROL_READY;
+	nlb->last_nlb_send = 0;
+	nlb->keepalive_sent = 1;
+	vpn_progress(vpninfo, PRG_INFO,
+		     _("NLB tunnel restored by ESP keepalive; tunnel-control exchange not required\n"));
+}
+#endif /* HAVE_ESP */
+
+void gpst_nlb_report_timeout(struct openconnect_info *vpninfo)
+{
+	struct gp_nlb_config *nlb = &vpninfo->gp_nlb;
+
+	if (!nlb->enabled)
+		return;
+	if (nlb->control_state == GP_NLB_CONTROL_READY)
+		vpn_progress(vpninfo, PRG_ERR,
+			     _("NLB tunnel control succeeded, but no valid ESP keepalive response was received\n"));
+	else if (nlb->control_state == GP_NLB_CONTROL_RESTORING)
+		vpn_progress(vpninfo, PRG_ERR,
+			     _("NLB tunnel restoration did not receive a valid ESP response\n"));
+	else
+		vpn_progress(vpninfo, PRG_ERR,
+			     _("NLB tunnel control did not complete after %u request(s)\n"),
+			     nlb->control_requests);
 }
 
 static int gp_nlb_replace_string(char **dst, const char *src)
@@ -387,12 +457,25 @@ static void gp_nlb_free_tunnel_info(struct gp_nlb_tunnel_info *info)
 	memset(info, 0, sizeof(*info));
 }
 
-static int gp_nlb_parse_address_list(xmlNode *node, char **values, int *count)
+static void gp_nlb_clear_address_list(char **values, int *count)
+{
+	int i;
+
+	for (i = 0; i < *count; i++) {
+		free(values[i]);
+		values[i] = NULL;
+	}
+	*count = 0;
+}
+
+static int gp_nlb_parse_address_list(xmlNode *node, char **values, int *count,
+				     int max_count)
 {
 	xmlNode *member;
 	char *s = NULL;
 
-	for (member = node->children; member && *count < 3; member = member->next) {
+	for (member = node->children; member && *count < max_count;
+	     member = member->next) {
 		if (xmlnode_get_val(member, "member", &s))
 			continue;
 		values[(*count)++] = s;
@@ -400,6 +483,13 @@ static int gp_nlb_parse_address_list(xmlNode *node, char **values, int *count)
 	}
 	free(s);
 	return 0;
+}
+
+static int gp_nlb_replace_address_list(xmlNode *node, char **values, int *count,
+				       int max_count)
+{
+	gp_nlb_clear_address_list(values, count);
+	return gp_nlb_parse_address_list(node, values, count, max_count);
 }
 
 static int gp_nlb_parse_tunnel_info_nodes(struct gp_nlb_tunnel_info *info,
@@ -421,10 +511,22 @@ static int gp_nlb_parse_tunnel_info_nodes(struct gp_nlb_tunnel_info *info,
 		} else if (!xmlnode_get_val(node, "in-tunnel-gw-ipv6", &s)) {
 			if (gp_nlb_is_ipv6(s))
 				ret = gp_nlb_replace_string(&info->inner_gw6, s);
-		} else if (xmlnode_is_named(node, "dns")) {
-			ret = gp_nlb_parse_address_list(node, info->dns, &info->nr_dns);
-		} else if (xmlnode_is_named(node, "wins")) {
-			ret = gp_nlb_parse_address_list(node, info->wins, &info->nr_wins);
+		} else if (xmlnode_is_named(node, "dns-v6")) {
+			info->dns_present = info->dns_v6 = 1;
+			ret = gp_nlb_replace_address_list(node, info->dns, &info->nr_dns,
+						  GP_NLB_MAX_DNS);
+		} else if (xmlnode_is_named(node, "dns") && !info->dns_v6) {
+			info->dns_present = 1;
+			ret = gp_nlb_replace_address_list(node, info->dns, &info->nr_dns,
+						  GP_NLB_MAX_DNS);
+		} else if (xmlnode_is_named(node, "wins-v6")) {
+			info->wins_present = info->wins_v6 = 1;
+			ret = gp_nlb_replace_address_list(node, info->wins, &info->nr_wins,
+						  GP_NLB_MAX_WINS);
+		} else if (xmlnode_is_named(node, "wins") && !info->wins_v6) {
+			info->wins_present = 1;
+			ret = gp_nlb_replace_address_list(node, info->wins, &info->nr_wins,
+						  GP_NLB_MAX_WINS);
 		}
 		free(s);
 		s = NULL;
@@ -443,6 +545,9 @@ static int gp_nlb_parse_tunnel_info_xml(struct openconnect_info *vpninfo,
 					xmlNode *xml_node, void *cb_data)
 {
 	(void)vpninfo;
+	if (!xmlnode_is_named(xml_node, "response") ||
+	    xmlnode_match_prop(xml_node, "status", "success"))
+		return -EINVAL;
 	return gp_nlb_parse_tunnel_info_nodes(cb_data, xml_node);
 }
 
@@ -464,8 +569,12 @@ static int gp_nlb_parse_tunnel_info(struct openconnect_info *vpninfo,
 	}
 	encoded[encoded_len] = '\0';
 	decoded = openconnect_base64_decode(&decoded_len, encoded);
-	if (!decoded || decoded_len <= GP_NLB_GCM_PREFIX_LEN)
+	if (!decoded || decoded_len <= GP_NLB_GCM_PREFIX_LEN) {
+		vpn_progress(vpninfo, PRG_ERR,
+			     _("NLB tunnel-control response has invalid base64 tunnel info: encoded=%d decoded=%d\n"),
+			     encoded_len, decoded_len);
 		goto out;
+	}
 	cipher_len = decoded_len - GP_NLB_GCM_PREFIX_LEN;
 	plain = malloc(cipher_len + 1);
 	if (!plain) {
@@ -475,11 +584,18 @@ static int gp_nlb_parse_tunnel_info(struct openconnect_info *vpninfo,
 	if (gp_nlb_aes256_gcm_decrypt(vpninfo->gp_nlb.hs_key,
 				      decoded + GP_NLB_GCM_TAG_LEN,
 				      decoded + GP_NLB_GCM_PREFIX_LEN,
-				      cipher_len, decoded, plain) < 0)
+				      cipher_len, decoded, plain) < 0) {
+		vpn_progress(vpninfo, PRG_ERR,
+			     _("NLB tunnel-control response failed AES-256-GCM authentication: cipher=%d bytes\n"),
+			     cipher_len);
 		goto out;
+	}
 	plain[cipher_len] = '\0';
 	ret = gpst_xml_or_error(vpninfo, (char *)plain,
 				gp_nlb_parse_tunnel_info_xml, NULL, info);
+	if (ret < 0)
+		vpn_progress(vpninfo, PRG_ERR,
+			     _("NLB tunnel-control response contains invalid tunnel-info XML\n"));
 
 out:
 	if (plain) {
@@ -524,13 +640,14 @@ static int gp_nlb_replace_ip_option(struct openconnect_info *vpninfo,
 
 static int gp_nlb_replace_address_options(struct openconnect_info *vpninfo,
 					  const char *name, char **values,
-					  int count, const char **ip_values)
+					  int count, int present,
+					  const char **ip_values)
 {
 	struct oc_vpn_option *new_opts = NULL, *tail, **opt;
 	const char *new_values[3];
 	int i;
 
-	if (!count)
+	if (!present)
 		return 0;
 	for (i = 0; i < count; i++) {
 		new_values[i] = add_option_dup(&new_opts, name, values[i], -1);
@@ -553,10 +670,12 @@ static int gp_nlb_replace_address_options(struct openconnect_info *vpninfo,
 		free_optlist(old);
 	}
 
-	for (tail = new_opts; tail->next; tail = tail->next)
-		;
-	tail->next = vpninfo->cstp_options;
-	vpninfo->cstp_options = new_opts;
+	if (new_opts) {
+		for (tail = new_opts; tail->next; tail = tail->next)
+			;
+		tail->next = vpninfo->cstp_options;
+		vpninfo->cstp_options = new_opts;
+	}
 	memset(ip_values, 0, 3 * sizeof(*ip_values));
 	for (i = 0; i < count; i++)
 		ip_values[i] = new_values[i];
@@ -570,21 +689,29 @@ static int gp_nlb_commit_tunnel_info(struct openconnect_info *vpninfo,
 	int ret;
 
 	if (vpninfo->ip_info.addr) {
-		if (!info->vip || !info->inner_gw)
+		if (!info->vip || !info->inner_gw) {
+			vpn_progress(vpninfo, PRG_ERR,
+				     _("NLB tunnel-control response is missing the IPv4 VIP or private gateway\n"));
 			return -EINVAL;
+		}
 	}
 	if (vpninfo->ip_info.addr6) {
-		if (!info->vip6 || !info->inner_gw6)
+		if (!info->vip6 || !info->inner_gw6) {
+			vpn_progress(vpninfo, PRG_ERR,
+				     _("NLB tunnel-control response is missing the IPv6 VIP or private gateway\n"));
 			return -EINVAL;
+		}
 	}
 	if (!vpninfo->ip_info.addr && !vpninfo->ip_info.addr6)
 		return -EINVAL;
 	ret = gp_nlb_replace_address_options(vpninfo, "DNS", info->dns,
-					     info->nr_dns, vpninfo->ip_info.dns);
+					     info->nr_dns, info->dns_present,
+					     vpninfo->ip_info.dns);
 	if (ret < 0)
 		return ret;
 	ret = gp_nlb_replace_address_options(vpninfo, "WINS", info->wins,
-					     info->nr_wins, vpninfo->ip_info.nbns);
+					     info->nr_wins, info->wins_present,
+					     vpninfo->ip_info.nbns);
 	if (ret < 0)
 		return ret;
 
@@ -603,30 +730,37 @@ static int gp_nlb_commit_tunnel_info(struct openconnect_info *vpninfo,
 	return 0;
 }
 
-static int gp_nlb_is_tunnel_response(const unsigned char *buf, int len)
-{
-	if (!buf || len < 8)
-		return 0;
-	if (!memcmp(buf + 4, gp_nlb_response_magic, sizeof(gp_nlb_response_magic)))
-		return 1;
-	return len >= GP_NLB_CONTROL_HEADER_LEN && !load_be32(buf) &&
-		memcmp(buf + 4, gp_nlb_request_magic, sizeof(gp_nlb_request_magic));
-}
-
 int gpst_nlb_handle_tunnel_response(struct openconnect_info *vpninfo,
 				    const unsigned char *buf, int len)
 {
 	struct gp_nlb_config *nlb = &vpninfo->gp_nlb;
 	struct gp_nlb_tunnel_info info = { 0 };
-	int count, i, found_info = 0, ret = -EINVAL;
+	int count, toc_end, i, found_info = 0, ret = -EINVAL;
 
-	if (!nlb->enabled || !gp_nlb_is_tunnel_response(buf, len))
+	if (!nlb->enabled || nlb->control_state != GP_NLB_CONTROL_WAITING)
 		return 0;
-	if (len < GP_NLB_CONTROL_HEADER_LEN)
-		return -EINVAL;
+	if (!gp_nlb_is_tunnel_response(buf, len)) {
+		if (buf && len >= 8)
+			vpn_progress(vpninfo, PRG_ERR,
+				     _("NLB tunnel-control received unexpected datagram: len=%d word0=0x%08x marker=%02x%02x%02x%02x\n"),
+				     len, load_be32(buf), buf[4], buf[5], buf[6], buf[7]);
+		else
+			vpn_progress(vpninfo, PRG_ERR,
+				     _("NLB tunnel-control received a truncated datagram: len=%d\n"), len);
+		return -EPROTO;
+	}
+
 	count = buf[16];
-	if (count > (len - GP_NLB_CONTROL_HEADER_LEN) / GP_NLB_TOC_ENTRY_LEN)
+	if (count > (len - GP_NLB_CONTROL_HEADER_LEN) / GP_NLB_TOC_ENTRY_LEN) {
+		vpn_progress(vpninfo, PRG_ERR,
+			     _("NLB tunnel-control response has truncated TOC: len=%d count=%d\n"),
+			     len, count);
 		return -EINVAL;
+	}
+	toc_end = GP_NLB_CONTROL_HEADER_LEN + count * GP_NLB_TOC_ENTRY_LEN;
+	vpn_progress(vpninfo, PRG_DEBUG,
+		     _("Received NLB tunnel-control response: len=%d framing=%s toc_count=%d\n"),
+		     len, !load_be32(buf) ? "zero-prefix" : "CTPG", count);
 
 	for (i = 0; i < count; i++) {
 		const unsigned char *entry = buf + GP_NLB_CONTROL_HEADER_LEN +
@@ -634,11 +768,21 @@ int gpst_nlb_handle_tunnel_response(struct openconnect_info *vpninfo,
 		int offset = load_be16(entry + 1);
 		int value_len = load_be16(entry + 3);
 
-		if (offset > len || value_len > len - offset)
+		vpn_progress(vpninfo, PRG_TRACE,
+			     _("NLB tunnel-control TOC entry %d: type=%u offset=%d len=%d\n"),
+			     i, entry[0], offset, value_len);
+		if (offset < toc_end || offset > len || value_len > len - offset) {
+			vpn_progress(vpninfo, PRG_ERR,
+				     _("NLB tunnel-control TOC entry %d is out of bounds: payload_start=%d offset=%d len=%d datagram=%d\n"),
+				     i, toc_end, offset, value_len, len);
 			goto out;
+		}
 		if (entry[0] == GP_NLB_BLOCK_TUNNEL_INFO) {
-			if (found_info)
+			if (found_info) {
+				vpn_progress(vpninfo, PRG_ERR,
+					     _("NLB tunnel-control response contains duplicate tunnel-info fields\n"));
 				goto out;
+			}
 			found_info = 1;
 			ret = gp_nlb_parse_tunnel_info(vpninfo, buf + offset,
 						       value_len, &info);
@@ -647,8 +791,17 @@ int gpst_nlb_handle_tunnel_response(struct openconnect_info *vpninfo,
 		}
 	}
 
-	if (!found_info)
+	if (!found_info) {
+		vpn_progress(vpninfo, PRG_ERR,
+			     _("NLB tunnel-control response does not contain tunnel info\n"));
 		goto out;
+	}
+	vpn_progress(vpninfo, PRG_DEBUG,
+		     _("NLB tunnel-info verified: ipv4=%s ipv6=%s dns=%d%s wins=%d%s\n"),
+		     info.vip && info.inner_gw ? "yes" : "no",
+		     info.vip6 && info.inner_gw6 ? "yes" : "no",
+		     info.nr_dns, info.dns_v6 ? " (IPv6)" : "",
+		     info.nr_wins, info.wins_v6 ? " (IPv6)" : "");
 	ret = gp_nlb_commit_tunnel_info(vpninfo, &info);
 	if (ret < 0)
 		goto out;
@@ -668,12 +821,31 @@ out:
 	return ret;
 }
 
+static int gp_nlb_copy_ssl_ip(const char *line, int line_len, int offset,
+			      int field_len, int af, char **out)
+{
+	char field[INET6_ADDRSTRLEN];
+	char *end;
+
+	if (field_len >= (int)sizeof(field) || offset > line_len ||
+	    field_len > line_len - offset)
+		return -EINVAL;
+	memcpy(field, line + offset, field_len);
+	field[field_len] = '\0';
+	end = field + field_len;
+	while (end > field && isspace((unsigned char)end[-1]))
+		*--end = '\0';
+	if ((af == AF_INET && !gp_nlb_is_ipv4(field)) ||
+	    (af == AF_INET6 && !gp_nlb_is_ipv6(field)))
+		return -EINVAL;
+	*out = strdup(field);
+	return *out ? 0 : -ENOMEM;
+}
+
 int gpst_nlb_parse_ssl_response(const char *buf, int len, struct gp_nlb_config *nlb)
 {
-	char *line, *vip = NULL, *inner = NULL, *hash, *start, *concat;
-	const char *hint_vip;
-	long version;
-	int ret = -EINVAL;
+	char *line, *vip = NULL, *inner = NULL, *vip6 = NULL, *inner6 = NULL;
+	int line_len, ret = -EINVAL;
 
 	if (!buf || len <= 0 || !nlb)
 		return -EINVAL;
@@ -690,44 +862,51 @@ int gpst_nlb_parse_ssl_response(const char *buf, int len, struct gp_nlb_config *
 			break;
 	}
 
-	if (!strncmp(line, "START_TUNNEL", 12)) {
+	line_len = strlen(line);
+	if (line_len == 12 && !memcmp(line, "START_TUNNEL", 12)) {
 		ret = 0;
 		goto out;
 	}
+	if (line_len < GP_NLB_SSL_IPV4_GW_OFFSET + GP_NLB_SSL_IPV4_FIELD_LEN ||
+	    strncmp(line, "110 ", 4) || !strstr(line, "START_TUNNEL"))
+		goto out;
+	ret = gp_nlb_copy_ssl_ip(line, line_len, GP_NLB_SSL_IPV4_VIP_OFFSET,
+				 GP_NLB_SSL_IPV4_FIELD_LEN, AF_INET, &vip);
+	if (ret < 0)
+		goto out;
+	ret = gp_nlb_copy_ssl_ip(line, line_len, GP_NLB_SSL_IPV4_GW_OFFSET,
+				 GP_NLB_SSL_IPV4_FIELD_LEN, AF_INET, &inner);
+	if (ret < 0)
+		goto out;
 
-	start = strstr(line, " START_TUNNEL");
-	if (!start)
-		goto out;
-	*start = '\0';
-	hash = strrchr(line, ' ');
-	if (!hash || strlen(hash + 1) != 40)
-		goto out;
-	*hash++ = '\0';
-
-	if (sscanf(line, "%ld", &version) != 1 || version != GP_NLB_SSL_PROTO_VERSION)
-		goto out;
-	concat = strchr(line, ' ');
-	if (!concat)
-		goto out;
-	concat++;
-
-	hint_vip = nlb->tunnel_vip;
-	if (gp_nlb_split_concat_ips(concat, hint_vip, &vip, &inner))
-		goto out;
+	if (line_len == GP_NLB_SSL_IPV6_RESPONSE_LEN) {
+		ret = gp_nlb_copy_ssl_ip(line, line_len, GP_NLB_SSL_IPV6_VIP_OFFSET,
+					 GP_NLB_SSL_IPV6_FIELD_LEN, AF_INET6, &vip6);
+		if (ret < 0)
+			goto out;
+		ret = gp_nlb_copy_ssl_ip(line, line_len, GP_NLB_SSL_IPV6_GW_OFFSET,
+					 GP_NLB_SSL_IPV6_FIELD_LEN, AF_INET6, &inner6);
+		if (ret < 0)
+			goto out;
+	}
 
 	free(nlb->tunnel_vip);
+	free(nlb->tunnel_vip6);
 	free(nlb->inner_gw_ip);
-	free(nlb->in_tunnel_gw_cert_chksum);
+	free(nlb->inner_gw_ip6);
 	nlb->tunnel_vip = vip;
+	nlb->tunnel_vip6 = vip6;
 	nlb->inner_gw_ip = inner;
-	vip = inner = NULL;
-	STRDUP(nlb->in_tunnel_gw_cert_chksum, hash);
+	nlb->inner_gw_ip6 = inner6;
+	vip = inner = vip6 = inner6 = NULL;
 	nlb->enabled = 1;
 	ret = 0;
 
 out:
 	free(vip);
 	free(inner);
+	free(vip6);
+	free(inner6);
 	free(line);
 	return ret;
 }
@@ -827,34 +1006,6 @@ int gpst_nlb_apply_tunnel_config(struct openconnect_info *vpninfo)
 	return gpst_nlb_apply_routes(vpninfo);
 }
 
-int gpst_nlb_opaque_due(struct openconnect_info *vpninfo, int *timeout)
-{
-	struct gp_nlb_config *nlb = &vpninfo->gp_nlb;
-	time_t now = time(NULL);
-	time_t due;
-
-	if (!nlb->enabled || !nlb->tunnel_opaque || !nlb->opaque_valid_until)
-		return 0;
-	due = nlb->opaque_valid_until;
-	if (due > GP_NLB_OPAQUE_REFRESH_MARGIN)
-		due -= GP_NLB_OPAQUE_REFRESH_MARGIN;
-	return ka_check_deadline(timeout, now, due);
-}
-
-int gpst_nlb_maintenance(struct openconnect_info *vpninfo, int *timeout)
-{
-	if (!gpst_nlb_opaque_due(vpninfo, timeout))
-		return 0;
-
-	vpn_progress(vpninfo, PRG_INFO, _("NLB tunnel-opaque refresh due\n"));
-	if (gpst_nlb_refresh_opaque(vpninfo) < 0) {
-		vpn_progress(vpninfo, PRG_ERR, _("NLB tunnel-opaque refresh failed\n"));
-		return -1;
-	}
-	vpninfo->dtls_need_reconnect = 1;
-	return 1;
-}
-
 int gpst_nlb_handle_ssl_connect_response(struct openconnect_info *vpninfo,
 					 const char *buf, int len)
 {
@@ -873,9 +1024,11 @@ int gpst_nlb_handle_ssl_connect_response(struct openconnect_info *vpninfo,
 		return -EINVAL;
 
 	vpn_progress(vpninfo, PRG_INFO,
-		     _("NLB SSL tunnel response: vip=%s inner_gw=%s cert_hash=%s\n"),
+		     _("NLB SSL tunnel response: vip=%s inner_gw=%s ipv6=%s cert_hash=%s\n"),
 		     vpninfo->gp_nlb.tunnel_vip ?: "unknown",
 		     vpninfo->gp_nlb.inner_gw_ip ?: "unknown",
+		     vpninfo->gp_nlb.tunnel_vip6 && vpninfo->gp_nlb.inner_gw_ip6 ?
+			     "present" : "absent",
 		     vpninfo->gp_nlb.in_tunnel_gw_cert_chksum ? "present" : "missing");
 	return gpst_nlb_apply_tunnel_config(vpninfo);
 }

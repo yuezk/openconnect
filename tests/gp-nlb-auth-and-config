@@ -1,7 +1,6 @@
 #!/bin/sh
 #
-# Validate GlobalProtect NLB config parsing and SSL tunnel handshake against
-# fake-gp-server NLB mode (issue #526 sample response).
+# Validate GlobalProtect NLB config parsing against fake-gp-server NLB mode.
 PRELOAD=1
 srcdir=${srcdir:-.}
 top_builddir=${top_builddir:-..}

@@ -364,6 +364,8 @@ int esp_mainloop(struct openconnect_info *vpninfo, int *timeout, int readable)
 		if (vpninfo->proto->udp_catch_probe) {
 			if (vpninfo->proto->udp_catch_probe(vpninfo, pkt)) {
 				if (vpninfo->dtls_state == DTLS_SLEEPING) {
+					if (vpninfo->proto->proto == PROTO_GPST)
+						gpst_nlb_restore_complete(vpninfo);
 					vpn_progress(vpninfo, PRG_INFO,
 						     _("ESP session established with server\n"));
 					vpninfo->dtls_state = DTLS_CONNECTED;
@@ -429,14 +431,6 @@ int esp_mainloop(struct openconnect_info *vpninfo, int *timeout, int readable)
 			vpninfo->proto->udp_send_probes(vpninfo);
 
 		vpninfo->dtls_times.last_tx = now;
-	}
-
-	if (vpninfo->proto->proto == PROTO_GPST) {
-		ret = gpst_nlb_maintenance(vpninfo, timeout);
-		if (ret < 0)
-			goto need_reconnect;
-		if (ret > 0)
-			work_done = 1;
 	}
 
 	if (vpninfo->dtls_state != DTLS_ESTABLISHED)
@@ -574,6 +568,8 @@ void esp_close(struct openconnect_info *vpninfo)
 	/* We close and reopen the socket in case we roamed and our
 	   local IP address has changed. */
 	if (vpninfo->dtls_fd >= 0) {
+		if (vpninfo->proto->proto == PROTO_GPST)
+			gpst_nlb_udp_closed(vpninfo);
 		unmonitor_fd(vpninfo, dtls);
 		closesocket(vpninfo->dtls_fd);
 		vpninfo->dtls_fd = -1;

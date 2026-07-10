@@ -766,7 +766,7 @@ static int gpst_parse_config_xml(struct openconnect_info *vpninfo, xmlNode *xml_
 
 	if (vpninfo->gp_nlb.enabled) {
 		vpn_progress(vpninfo, PRG_INFO,
-			     _("NLB enabled: hs_key=%d bytes enc_hs_key=%s(%zu bytes b64) tunnel_opaque=%s(%zu bytes b64) vip=%s connected_gw=%s refresh=%llds\n"),
+			     _("NLB enabled: hs_key=%d bytes enc_hs_key=%s(%zu bytes b64) tunnel_opaque=%s(%zu bytes b64) vip=%s connected_gw=%s opaque_valid_for=%llds\n"),
 			     vpninfo->gp_nlb.hs_key_len,
 			     vpninfo->gp_nlb.enc_hs_key ? "present" : "missing",
 			     vpninfo->gp_nlb.enc_hs_key ? strlen(vpninfo->gp_nlb.enc_hs_key) : 0,
@@ -887,74 +887,6 @@ static int gpst_build_getconfig_request(struct openconnect_info *vpninfo,
 		buf_append(request_body, "&%s", vpninfo->cookie);
 	filter_opts(request_body, vpninfo->cookie, "serialno,clientgpversion,host-id", 1);
 	return buf_error(request_body);
-}
-
-static int gpst_parse_nlb_opaque_xml(struct openconnect_info *vpninfo, xmlNode *xml_node, void *cb_data)
-{
-	char *s = NULL;
-
-	for (xml_node = xml_node->children; xml_node; xml_node = xml_node->next) {
-		if (xmlnode_is_named(xml_node, "hs-key")) {
-#ifdef HAVE_ESP
-			int keylen = xml_to_key(xml_node, vpninfo->gp_nlb.hs_key, sizeof(vpninfo->gp_nlb.hs_key));
-
-			if (keylen > 0) {
-				vpninfo->gp_nlb.hs_key_len = keylen;
-				vpninfo->gp_nlb.enabled = 1;
-			}
-#endif /* HAVE_ESP */
-		} else if (!xmlnode_get_val(xml_node, "enc-hs-key", &s)) {
-			free(vpninfo->gp_nlb.enc_hs_key);
-			vpninfo->gp_nlb.enc_hs_key = s;
-			s = NULL;
-			vpninfo->gp_nlb.enabled = 1;
-		} else if (xmlnode_is_named(xml_node, "tunnel-opaque")) {
-			gpst_parse_nlb_tunnel_opaque(vpninfo, xml_node);
-		} else if (!xmlnode_get_val(xml_node, "valid-period", &s)) {
-			vpninfo->gp_nlb.opaque_valid_until = time(NULL) + atol(s);
-		}
-		free(s);
-		s = NULL;
-	}
-	return 0;
-}
-
-int gpst_nlb_refresh_opaque(struct openconnect_info *vpninfo)
-{
-	char *orig_path, *xml_buf = NULL;
-	struct oc_text_buf *request_body = buf_alloc();
-	int result;
-
-	if (!vpninfo->gp_nlb.enabled)
-		return 0;
-
-	if (gpst_build_getconfig_request(vpninfo, request_body)) {
-		buf_free(request_body);
-		return -ENOMEM;
-	}
-
-	orig_path = vpninfo->urlpath;
-	vpninfo->urlpath = strdup("ssl-vpn/getconfig.esp");
-	result = do_https_request(vpninfo, "POST", "application/x-www-form-urlencoded",
-				  request_body, &xml_buf, NULL, HTTP_NO_FLAGS);
-	free(vpninfo->urlpath);
-	vpninfo->urlpath = orig_path;
-	buf_free(request_body);
-
-	if (result < 0)
-		return result;
-
-	if (result >= 0 && xml_buf)
-		vpn_progress(vpninfo, PRG_DEBUG,
-			     _("GlobalProtect NLB opaque refresh response:\n%s\n"),
-			     xml_buf);
-
-	result = gpst_xml_or_error(vpninfo, xml_buf, gpst_parse_nlb_opaque_xml, NULL, NULL);
-	free(xml_buf);
-	if (result)
-		return result;
-
-	return gpst_nlb_prepare(vpninfo);
 }
 
 static int gpst_get_config(struct openconnect_info *vpninfo)
@@ -1478,13 +1410,6 @@ int gpst_mainloop(struct openconnect_info *vpninfo, int *timeout, int readable)
 		/* fall through */
 	case DTLS_ESTABLISHED:
 		/* Rekey or check-and-resubmit HIP if needed */
-		ret = gpst_nlb_maintenance(vpninfo, timeout);
-		if (ret < 0) {
-			vpninfo->dtls_need_reconnect = 1;
-			return 1;
-		}
-		if (ret > 0)
-			return 1;
 		if (keepalive_action(&vpninfo->ssl_times, timeout) == KA_REKEY)
 			goto do_rekey;
 		else if (trojan_check_deadline(vpninfo, timeout))
@@ -1499,6 +1424,7 @@ int gpst_mainloop(struct openconnect_info *vpninfo, int *timeout, int readable)
 		}
 
 		/* ... before we switch to HTTPS instead */
+		gpst_nlb_report_timeout(vpninfo);
 		vpn_progress(vpninfo, PRG_ERR,
 				     _("Failed to connect ESP tunnel; using HTTPS instead.\n"));
 		/* XX: gpst_connect does nothing if ESP is enabled and has secrets */
@@ -1514,12 +1440,6 @@ int gpst_mainloop(struct openconnect_info *vpninfo, int *timeout, int readable)
 		/* ESP is disabled */
 		;
 	}
-
-	ret = gpst_nlb_maintenance(vpninfo, timeout);
-	if (ret < 0)
-		goto do_reconnect;
-	if (ret > 0)
-		work_done = 1;
 
 	if (vpninfo->ssl_fd == -1)
 		goto do_reconnect;
@@ -1899,7 +1819,7 @@ int gpst_nlb_send_esp_keepalive(struct openconnect_info *vpninfo)
 
 	if (gpst_build_icmp_probe_packet(vpninfo, pkt, plen, probe_payload,
 					 probe_payload_len,
-					 vpninfo->udp_probes_sent, dst) < 0) {
+					 vpninfo->gp_nlb.keepalive_seq++, dst) < 0) {
 		free_pkt(vpninfo, pkt);
 		return -EINVAL;
 	}
@@ -1950,7 +1870,7 @@ int gpst_esp_send_probes(struct openconnect_info *vpninfo)
 	 */
 	const unsigned char *probe_payload;
 	size_t probe_payload_len;
-	int icmplen, plen, seq = vpninfo->udp_probes_sent;
+	int icmplen, plen, ret, i, seq = vpninfo->udp_probes_sent;
 
 	if (vpninfo->gp_nlb.enabled) {
 		probe_payload = gpst_nlb_probe_payload(&probe_payload_len);
@@ -1985,8 +1905,16 @@ int gpst_esp_send_probes(struct openconnect_info *vpninfo)
 		monitor_except_fd(vpninfo, dtls);
 	}
 
+	if (vpninfo->gp_nlb.enabled) {
+		ret = gpst_nlb_restore(vpninfo);
+		if (ret) {
+			free_pkt(vpninfo, pkt);
+			return ret < 0 ? ret : 0;
+		}
+	}
+
 	if (vpninfo->gp_nlb.enabled && !gpst_nlb_control_ready(vpninfo)) {
-		int ret = gpst_nlb_send_tunnel_request(vpninfo);
+		ret = gpst_nlb_send_tunnel_request(vpninfo);
 
 		free_pkt(vpninfo, pkt);
 		if (ret < 0)
@@ -1997,8 +1925,22 @@ int gpst_esp_send_probes(struct openconnect_info *vpninfo)
 	}
 
 	if (vpninfo->gp_nlb.enabled && !vpninfo->gp_nlb.keepalive_sent) {
-		if (gpst_nlb_send_esp_keepalive(vpninfo) >= 0)
-			vpninfo->gp_nlb.keepalive_sent = 1;
+		for (i = 0; i < 3; i++) {
+			ret = gpst_nlb_send_esp_keepalive(vpninfo);
+			if (ret < 0)
+				break;
+		}
+		free_pkt(vpninfo, pkt);
+		if (i != 3) {
+			vpn_progress(vpninfo, PRG_ERR,
+				     _("Failed to send NLB ESP activation keepalive %d of 3\n"),
+				     i + 1);
+			return ret;
+		}
+		vpninfo->gp_nlb.keepalive_sent = 1;
+		vpn_progress(vpninfo, PRG_DEBUG,
+			     _("Sent NLB ESP activation burst (3 keepalives)\n"));
+		return 0;
 	}
 
 	if (gpst_build_icmp_probe_packet(vpninfo, pkt, plen, probe_payload,

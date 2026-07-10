@@ -405,9 +405,10 @@ struct gp_nlb_config {
 	char *connected_gw_ip;
 	char *in_tunnel_gw_cert_chksum;
 	int control_state;
-	time_t control_last_sent;
+	time_t last_nlb_send;
 	unsigned int control_requests;
 	int keepalive_sent;
+	unsigned int keepalive_seq;
 };
 
 struct cert_info {
@@ -1440,14 +1441,17 @@ int gpst_nlb_control_ready(struct openconnect_info *vpninfo);
 int gpst_nlb_send_tunnel_request(struct openconnect_info *vpninfo);
 int gpst_nlb_handle_tunnel_response(struct openconnect_info *vpninfo,
 				    const unsigned char *buf, int len);
+#ifdef HAVE_ESP
+int gpst_nlb_restore(struct openconnect_info *vpninfo);
+void gpst_nlb_udp_closed(struct openconnect_info *vpninfo);
+void gpst_nlb_restore_complete(struct openconnect_info *vpninfo);
+#endif
+void gpst_nlb_report_timeout(struct openconnect_info *vpninfo);
 int gpst_nlb_parse_ssl_response(const char *buf, int len, struct gp_nlb_config *nlb);
 int gpst_nlb_apply_routes(struct openconnect_info *vpninfo);
 int gpst_nlb_apply_tunnel_config(struct openconnect_info *vpninfo);
 int gpst_nlb_handle_ssl_connect_response(struct openconnect_info *vpninfo,
 					 const char *buf, int len);
-int gpst_nlb_refresh_opaque(struct openconnect_info *vpninfo);
-int gpst_nlb_opaque_due(struct openconnect_info *vpninfo, int *timeout);
-int gpst_nlb_maintenance(struct openconnect_info *vpninfo, int *timeout);
 int gpst_mainloop(struct openconnect_info *vpninfo, int *timeout, int readable);
 int gpst_esp_send_probes(struct openconnect_info *vpninfo);
 int gpst_esp_catch_probe(struct openconnect_info *vpninfo, struct pkt *pkt);
