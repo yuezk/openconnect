@@ -196,6 +196,7 @@ struct openconnect_info *openconnect_vpninfo_new(const char *useragent,
 	vpninfo->dtls_fd = -1;
 	vpninfo->need_poll_cmd_fd = -1;
 	vpninfo->cmd_fd = -1;
+	vpninfo->cmd_fd_write = -1;
 	init_pkt_queue(&vpninfo->free_queue);
 	init_pkt_queue(&vpninfo->incoming_queue);
 	init_pkt_queue(&vpninfo->outgoing_queue);
@@ -771,7 +772,7 @@ static void free_certinfo(struct cert_info *certinfo)
 void openconnect_vpninfo_free(struct openconnect_info *vpninfo)
 {
 	openconnect_close_https(vpninfo, 1);
-	if (vpninfo->proto->udp_shutdown)
+	if (vpninfo->proto && vpninfo->proto->udp_shutdown)
 		vpninfo->proto->udp_shutdown(vpninfo);
 	if (vpninfo->tncc_fd >= 0)
 		closesocket(vpninfo->tncc_fd);
