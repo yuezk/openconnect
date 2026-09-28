@@ -990,6 +990,9 @@ int gpst_nlb_apply_tunnel_config(struct openconnect_info *vpninfo)
 	struct gp_nlb_config *nlb = &vpninfo->gp_nlb;
 	int ret;
 
+	if (!nlb->enabled)
+		return 0;
+
 	if (vpninfo->ip_info.addr && nlb->tunnel_vip) {
 		ret = gp_nlb_replace_ip_option(vpninfo, "ipaddr", nlb->tunnel_vip,
 					       &vpninfo->ip_info.addr);
