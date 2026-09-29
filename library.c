@@ -1070,6 +1070,13 @@ int openconnect_set_gp_host_id(struct openconnect_info *vpninfo,
 	return 0;
 }
 
+void openconnect_set_gp_hip_report_callback(struct openconnect_info *vpninfo,
+					    void *data, openconnect_gp_hip_report_vfn callback)
+{
+	vpninfo->gp_hip_report_data = data;
+	vpninfo->gp_hip_report = callback;
+}
+
 const char *openconnect_get_gp_host_id(struct openconnect_info *vpninfo)
 {
 	return vpninfo->gp_host_id;

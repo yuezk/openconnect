@@ -33,6 +33,8 @@
 #ifdef _WIN32
 #include "win32-ipicmp.h"
 #else
+#include <poll.h>
+#include <signal.h>
 #include <sys/wait.h>
 /* The BSDs require the first two headers before netinet/ip.h
  * (Linux and macOS already #include them within netinet/ip.h)
@@ -1132,8 +1134,10 @@ out:
 	return buf_free(buf);
 }
 
+#define HIP_REPORT_MAX_SIZE (1024 * 1024)
+
 /* check if HIP report is needed (to ssl-vpn/hipreportcheck.esp) or submit HIP report contents (to ssl-vpn/hipreport.esp) */
-static int check_or_submit_hip_report(struct openconnect_info *vpninfo, const char *report)
+static int check_or_submit_hip_report(struct openconnect_info *vpninfo, const char *report, size_t report_len)
 {
 	int result;
 
@@ -1147,8 +1151,16 @@ static int check_or_submit_hip_report(struct openconnect_info *vpninfo, const ch
 	if (vpninfo->ip_info.addr6)
 		append_opt(request_body, "client-ipv6", vpninfo->ip_info.addr6);
 	if (report) {
+		if (report_len > HIP_REPORT_MAX_SIZE) {
+			result = -E2BIG;
+			goto out;
+		}
+		if (memchr(report, 0, report_len)) {
+			result = -EINVAL;
+			goto out;
+		}
 		/* XML report contains many characters requiring URL-encoding (%xx) */
-		buf_ensure_space(request_body, strlen(report)*3);
+		buf_ensure_space(request_body, report_len*3);
 		append_opt(request_body, "report", report);
 	} else {
 		result = build_csd_token(vpninfo);
@@ -1167,12 +1179,175 @@ static int check_or_submit_hip_report(struct openconnect_info *vpninfo, const ch
 
 	if (result >= 0)
 		result = gpst_xml_or_error(vpninfo, xml_buf, report ? NULL : parse_hip_report_check, NULL, NULL);
+	if (result == 0 && report && vpninfo->gp_hip_report)
+		vpninfo->gp_hip_report(vpninfo->gp_hip_report_data, report, report_len);
 
 out:
 	buf_free(request_body);
 	free(xml_buf);
 	return result;
 }
+
+#if !defined(_WIN32) && !defined(__native_client__)
+#define HIP_SCRIPT_TIMEOUT_SEC 60
+
+static int hip_cancel_pending(struct openconnect_info *vpninfo)
+{
+	struct pollfd command;
+	fd_set readable;
+	int ready;
+
+	if (vpninfo->got_cancel_cmd || vpninfo->got_pause_cmd)
+		return 1;
+	if (vpninfo->cmd_fd < 0)
+		return 0;
+	if (vpninfo->cmd_fd >= FD_SETSIZE) {
+		vpninfo->got_cancel_cmd = 1;
+		vpninfo->cancel_type = OC_CMD_CANCEL;
+		return 1;
+	}
+
+	command.fd = vpninfo->cmd_fd;
+	command.events = POLLIN;
+	command.revents = 0;
+	do {
+		ready = poll(&command, 1, 0);
+	} while (ready < 0 && errno == EINTR);
+	if (ready < 0) {
+		vpninfo->got_cancel_cmd = 1;
+		vpninfo->cancel_type = OC_CMD_CANCEL;
+		return 1;
+	}
+	if (ready > 0 && (command.revents & POLLIN)) {
+		FD_ZERO(&readable);
+		FD_SET(vpninfo->cmd_fd, &readable);
+		check_cmd_fd(vpninfo, &readable);
+	}
+	if (ready > 0 && (command.revents & (POLLERR | POLLHUP | POLLNVAL))) {
+		vpninfo->got_cancel_cmd = 1;
+		vpninfo->cancel_type = OC_CMD_CANCEL;
+	}
+	return vpninfo->got_cancel_cmd || vpninfo->got_pause_cmd;
+}
+
+static int collect_hip_report(struct openconnect_info *vpninfo, pid_t child, int fd,
+			      struct oc_text_buf *report_buf, int *status)
+{
+	struct timespec start, now;
+	int exited = 0, eof = 0;
+	int ret = 0;
+
+	if (!report_buf) {
+		ret = -ENOMEM;
+		goto abort_child;
+	}
+	if (clock_gettime(CLOCK_MONOTONIC, &start)) {
+		ret = -errno;
+		goto abort_child;
+	}
+
+	while (!exited || !eof) {
+		long long remaining_ms;
+		int ready;
+		struct pollfd fds[2];
+		nfds_t count = vpninfo->cmd_fd >= 0 ? 2 : 1;
+
+		if (hip_cancel_pending(vpninfo)) {
+			ret = -EINTR;
+			goto abort_child;
+		}
+
+		if (clock_gettime(CLOCK_MONOTONIC, &now)) {
+			ret = -errno;
+			goto abort_child;
+		}
+		remaining_ms = (HIP_SCRIPT_TIMEOUT_SEC - (now.tv_sec - start.tv_sec)) * 1000LL
+			- (now.tv_nsec - start.tv_nsec) / 1000000LL;
+		if (remaining_ms <= 0) {
+			ret = -ETIMEDOUT;
+			goto abort_child;
+		}
+
+		if (!exited) {
+			pid_t result = waitpid(child, status, WNOHANG);
+			if (result == child)
+				exited = 1;
+			else if (result < 0 && errno != EINTR) {
+				ret = -errno;
+				goto abort_child;
+			}
+		}
+		if (exited && eof)
+			break;
+
+		/* Keep watching the command pipe after EOF: the child may have closed
+		 * stdout but still be running. */
+		fds[0].fd = eof ? -1 : fd;
+		fds[0].events = POLLIN;
+		fds[0].revents = 0;
+		if (count == 2) {
+			fds[1].fd = vpninfo->cmd_fd;
+			fds[1].events = POLLIN;
+			fds[1].revents = 0;
+		}
+		ready = poll(fds, count, remaining_ms < 250 ? (int)remaining_ms : 250);
+		if (ready < 0) {
+			if (errno == EINTR)
+				continue;
+			ret = -errno;
+			goto abort_child;
+		}
+		if (ready && hip_cancel_pending(vpninfo)) {
+			ret = -EINTR;
+			goto abort_child;
+		}
+		if (ready && !eof && fds[0].revents) {
+			char bytes[4096];
+			ssize_t count = read(fd, bytes, sizeof(bytes));
+			if (count < 0) {
+				if (errno == EINTR || errno == EAGAIN)
+					continue;
+				ret = -errno;
+				goto abort_child;
+			}
+			if (!count)
+				eof = 1;
+			else if (memchr(bytes, 0, count)) {
+				ret = -EINVAL;
+				goto abort_child;
+			}
+			else if (count > HIP_REPORT_MAX_SIZE - report_buf->pos) {
+				ret = -E2BIG;
+				goto abort_child;
+			} else {
+				buf_append_bytes(report_buf, bytes, (int)count);
+				if (buf_error(report_buf)) {
+					ret = buf_error(report_buf);
+					goto abort_child;
+				}
+			}
+		}
+	}
+	if (hip_cancel_pending(vpninfo)) {
+		ret = -EINTR;
+		goto abort_child;
+	}
+	close(fd);
+	return 0;
+
+abort_child:
+	/* The script can spawn descendants which inherit stdout. Kill the whole
+	 * group so neither they nor the direct child can outlive the deadline. */
+	kill(-child, SIGKILL);
+	if (!exited) {
+		kill(child, SIGKILL);
+		while (waitpid(child, status, 0) < 0 && errno == EINTR)
+			;
+	}
+	close(fd);
+	return ret;
+}
+#endif
 
 static int run_hip_script(struct openconnect_info *vpninfo)
 {
@@ -1221,23 +1396,42 @@ static int run_hip_script(struct openconnect_info *vpninfo)
 		set_fd_cloexec(pipefd[0]);
 		set_fd_cloexec(pipefd[1]);
 	}
+	if (hip_cancel_pending(vpninfo)) {
+		close(pipefd[0]);
+		close(pipefd[1]);
+		return -EINTR;
+	}
 	child = fork();
 	if (child == -1) {
+		close(pipefd[0]);
+		close(pipefd[1]);
 		vpn_progress(vpninfo, PRG_ERR, _("Failed to fork for HIP script\n"));
 		return -EPERM;
 	} else if (child > 0) {
 		/* in parent: read report from child */
 		struct oc_text_buf *report_buf = buf_alloc();
-		char b[256];
-		int i, status;
+		int status;
 		close(pipefd[1]);
 
-		buf_truncate(report_buf);
-		while ((i = read(pipefd[0], b, sizeof(b))) > 0)
-			buf_append_bytes(report_buf, b, i);
-
-		waitpid(child, &status, 0);
-		if (!WIFEXITED(status)) {
+		if (report_buf)
+			buf_truncate(report_buf);
+		/* The child creates its own process group before dropping privileges. */
+		if (setpgid(child, child) && errno != EACCES && errno != ESRCH)
+			vpn_progress(vpninfo, PRG_DEBUG, _("Failed to set HIP script process group\n"));
+		ret = collect_hip_report(vpninfo, child, pipefd[0], report_buf, &status);
+		if (ret == -ETIMEDOUT) {
+			vpn_progress(vpninfo, PRG_ERR, _("HIP script '%s' timed out\n"),
+					vpninfo->csd_wrapper);
+		} else if (ret == -E2BIG) {
+			vpn_progress(vpninfo, PRG_ERR, _("HIP script '%s' exceeded the 1 MiB report limit\n"),
+					vpninfo->csd_wrapper);
+		} else if (ret == -EINTR) {
+			vpn_progress(vpninfo, PRG_INFO, _("HIP script '%s' canceled\n"),
+					vpninfo->csd_wrapper);
+		} else if (ret) {
+			vpn_progress(vpninfo, PRG_ERR, _("Failed to read HIP script '%s': %s\n"),
+					vpninfo->csd_wrapper, strerror(-ret));
+		} else if (!WIFEXITED(status)) {
 			vpn_progress(vpninfo, PRG_ERR,
 						 _("HIP script '%s' exited abnormally\n"),
 						 vpninfo->csd_wrapper);
@@ -1252,7 +1446,7 @@ static int run_hip_script(struct openconnect_info *vpninfo)
 				     _("HIP script '%s' completed successfully (report is %d bytes).\n"),
 				     vpninfo->csd_wrapper, report_buf->pos);
 
-			ret = check_or_submit_hip_report(vpninfo, report_buf->data);
+			ret = check_or_submit_hip_report(vpninfo, report_buf->data, report_buf->pos);
 			if (ret < 0)
 				vpn_progress(vpninfo, PRG_ERR, _("HIP report submission failed.\n"));
 			else {
@@ -1266,7 +1460,14 @@ static int run_hip_script(struct openconnect_info *vpninfo)
 		/* in child: run HIP script */
 		const char *hip_argv[32];
 		int i = 0;
+		if (setpgid(0, 0) < 0)
+			_exit(1);
 		close(pipefd[0]);
+		/* Only the parent may consume cancellation commands. */
+		if (vpninfo->cmd_fd >= 0)
+			close(vpninfo->cmd_fd);
+		if (vpninfo->cmd_fd_write >= 0)
+			close(vpninfo->cmd_fd_write);
 		/* The duplicated fd does not have O_CLOEXEC */
 		dup2(pipefd[1], 1);
 
@@ -1330,7 +1531,7 @@ static int check_and_maybe_submit_hip_report(struct openconnect_info *vpninfo)
 {
 	int ret;
 
-	ret = check_or_submit_hip_report(vpninfo, NULL);
+	ret = check_or_submit_hip_report(vpninfo, NULL, 0);
 	if (ret == -EAGAIN) {
 		vpn_progress(vpninfo, PRG_DEBUG,
 					 _("Gateway says HIP report submission is needed.\n"));

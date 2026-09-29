@@ -844,6 +844,8 @@ struct openconnect_info {
 	openconnect_getaddrinfo_vfn getaddrinfo_override;
 	openconnect_setup_tun_vfn setup_tun;
 	openconnect_reconnected_vfn reconnected;
+	openconnect_gp_hip_report_vfn gp_hip_report;
+	void *gp_hip_report_data;
 
 	int (*ssl_read)(struct openconnect_info *vpninfo, char *buf, size_t len);
 	int (*ssl_gets)(struct openconnect_info *vpninfo, char *buf, size_t len);

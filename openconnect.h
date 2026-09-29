@@ -476,6 +476,11 @@ int openconnect_set_gp_os_version(struct openconnect_info *vpninfo,
 				  const char *gp_os_version);
 int openconnect_set_gp_host_id(struct openconnect_info *vpninfo,
 			       const char *gp_host_id);
+/* Called only after the gateway accepts a HIP report. The report is borrowed
+ * for the duration of the callback; callers must copy it to retain it. */
+typedef void (*openconnect_gp_hip_report_vfn)(void *data, const char *report, size_t length);
+void openconnect_set_gp_hip_report_callback(struct openconnect_info *vpninfo,
+					    void *data, openconnect_gp_hip_report_vfn callback);
 
 
 int openconnect_passphrase_from_fsid(struct openconnect_info *vpninfo);
