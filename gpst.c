@@ -1020,7 +1020,7 @@ static int gpst_connect(struct openconnect_info *vpninfo)
 	}
 
 	buf[nread] = '\0';
-	if (nread == (int)sizeof(start_tunnel) && !strstr(buf, start_tunnel)) {
+	if (nread == (int)sizeof(start_tunnel) && memcmp(buf, start_tunnel, sizeof(start_tunnel))) {
 		int more = vpninfo->ssl_gets(vpninfo, buf + nread, sizeof(buf) - 1 - nread);
 
 		if (more > 0)
