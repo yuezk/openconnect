@@ -846,6 +846,12 @@ struct openconnect_info {
 	openconnect_reconnected_vfn reconnected;
 	openconnect_gp_hip_report_vfn gp_hip_report;
 	void *gp_hip_report_data;
+	openconnect_gp_hip_generate_fn gp_hip_generate;
+	void *gp_hip_generate_data;
+	openconnect_gp_hip_validate_fn gp_hip_validate;
+	void *gp_hip_validate_data;
+	char **gp_hip_environment;
+	char *gp_hip_cwd;
 
 	int (*ssl_read)(struct openconnect_info *vpninfo, char *buf, size_t len);
 	int (*ssl_gets)(struct openconnect_info *vpninfo, char *buf, size_t len);

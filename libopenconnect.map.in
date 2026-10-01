@@ -113,6 +113,13 @@ OPENCONNECT_5_7 {
 	openconnect_set_cookie;
 	openconnect_set_allow_insecure_crypto;
 	openconnect_get_auth_expiration;
+	openconnect_set_gp_hip_generator;
+	openconnect_set_gp_hip_script;
+	openconnect_collect_gp_hip_report;
+	openconnect_set_gp_hip_report_callback;
+	openconnect_set_gp_app_version;
+	openconnect_set_gp_os_version;
+	openconnect_set_gp_host_id;
 	openconnect_get_gp_session_lifetime;
 	openconnect_get_gp_user_expires;
 	openconnect_get_gp_lifetime_notify_prior;

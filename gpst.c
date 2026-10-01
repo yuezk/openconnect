@@ -105,12 +105,12 @@ static int filter_opts(struct oc_text_buf *buf, const char *query, const char *i
 }
 
 /* Parse a JavaScript/JSON string to handle non-literal escape
-   characters.
+			characters.
 
-   Falls back to naïvely returning everything between the "..."
-   delimiters if JSON is not available in this build, or if the string
-   is mangled and not legal JavaScript/JSON (e.g. contains '\u' followed by
-   anything other than 4 hex digits).
+			Falls back to naïvely returning everything between the "..."
+			delimiters if JSON is not available in this build, or if the string
+			is mangled and not legal JavaScript/JSON (e.g. contains '\u' followed by
+			anything other than 4 hex digits).
 */
 static char *json_get_string(const char *start, size_t length)
 {
@@ -362,14 +362,16 @@ static int check_hmac_algo(struct openconnect_info *v, const char *s)
 {
 	if (!strcmp(s, "sha1"))	  return HMAC_SHA1;
 	if (!strcmp(s, "md5"))    return HMAC_MD5;
-	if (!strcmp(s, "sha256")) return HMAC_SHA256;
+	if (!strcmp(s, "sha256"))
+		return HMAC_SHA256;
 	vpn_progress(v, PRG_ERR, _("Unknown ESP MAC algorithm: %s\n"), s);
 	return -ENOENT;
 }
 
 static int check_enc_algo(struct openconnect_info *v, const char *s)
 {
-	if (!strcmp(s, "aes128") || !strcmp(s, "aes-128-cbc")) return ENC_AES_128_CBC;
+	if (!strcmp(s, "aes128") || !strcmp(s, "aes-128-cbc"))
+		return ENC_AES_128_CBC;
 	if (!strcmp(s, "aes-256-cbc"))                         return ENC_AES_256_CBC;
 	if (!strcmp(s, "aes-128-gcm") || !strcmp(s, "aes128gcm16")) {
 		v->esp_gcm_icv = 16;
@@ -435,7 +437,8 @@ static int xml_to_key(xmlNode *xml_node, unsigned char *dest, int dest_size)
 	for (child = xml_node->children; child; child=child->next) {
 		if (xmlnode_get_val(child, "bits", &s) == 0) {
 			explen = atoi(s);
-			if (explen & 0x07) goto out;
+			if (explen & 0x07)
+				goto out;
 			explen >>= 3;
 		} else if (xmlnode_get_val(child, "val", &s) == 0) {
 			for (p=s; p[0] && p[1]; p+=2)
@@ -532,7 +535,6 @@ static int gpst_parse_config_xml(struct openconnect_info *vpninfo, xmlNode *xml_
 
 	if (!xml_node || !xmlnode_is_named(xml_node, "response"))
 		return -EINVAL;
-
 
 	struct oc_vpn_option *new_opts = NULL;
 	struct oc_ip_info new_ip_info = {};
@@ -1135,6 +1137,7 @@ out:
 }
 
 #define HIP_REPORT_MAX_SIZE (1024 * 1024)
+#define HIP_REPORT_TIMEOUT_SEC 60
 
 /* check if HIP report is needed (to ssl-vpn/hipreportcheck.esp) or submit HIP report contents (to ssl-vpn/hipreport.esp) */
 static int check_or_submit_hip_report(struct openconnect_info *vpninfo, const char *report, size_t report_len)
@@ -1189,7 +1192,6 @@ out:
 }
 
 #if !defined(_WIN32) && !defined(__native_client__)
-#define HIP_SCRIPT_TIMEOUT_SEC 60
 
 static int hip_cancel_pending(struct openconnect_info *vpninfo)
 {
@@ -1230,10 +1232,10 @@ static int hip_cancel_pending(struct openconnect_info *vpninfo)
 	return vpninfo->got_cancel_cmd || vpninfo->got_pause_cmd;
 }
 
-static int collect_hip_report(struct openconnect_info *vpninfo, pid_t child, int fd,
-			      struct oc_text_buf *report_buf, int *status)
+static int collect_hip_script_output(struct openconnect_info *vpninfo, pid_t child, int fd,
+			      struct oc_text_buf *report_buf, int *status,
+	const struct openconnect_gp_hip_control *control)
 {
-	struct timespec start, now;
 	int exited = 0, eof = 0;
 	int ret = 0;
 
@@ -1241,32 +1243,14 @@ static int collect_hip_report(struct openconnect_info *vpninfo, pid_t child, int
 		ret = -ENOMEM;
 		goto abort_child;
 	}
-	if (clock_gettime(CLOCK_MONOTONIC, &start)) {
-		ret = -errno;
-		goto abort_child;
-	}
-
 	while (!exited || !eof) {
-		long long remaining_ms;
 		int ready;
 		struct pollfd fds[2];
 		nfds_t count = vpninfo->cmd_fd >= 0 ? 2 : 1;
 
-		if (hip_cancel_pending(vpninfo)) {
-			ret = -EINTR;
+		ret = control->check(control->data);
+		if (ret)
 			goto abort_child;
-		}
-
-		if (clock_gettime(CLOCK_MONOTONIC, &now)) {
-			ret = -errno;
-			goto abort_child;
-		}
-		remaining_ms = (HIP_SCRIPT_TIMEOUT_SEC - (now.tv_sec - start.tv_sec)) * 1000LL
-			- (now.tv_nsec - start.tv_nsec) / 1000000LL;
-		if (remaining_ms <= 0) {
-			ret = -ETIMEDOUT;
-			goto abort_child;
-		}
 
 		if (!exited) {
 			pid_t result = waitpid(child, status, WNOHANG);
@@ -1290,17 +1274,16 @@ static int collect_hip_report(struct openconnect_info *vpninfo, pid_t child, int
 			fds[1].events = POLLIN;
 			fds[1].revents = 0;
 		}
-		ready = poll(fds, count, remaining_ms < 250 ? (int)remaining_ms : 250);
+		ready = poll(fds, count, 100);
 		if (ready < 0) {
 			if (errno == EINTR)
 				continue;
 			ret = -errno;
 			goto abort_child;
 		}
-		if (ready && hip_cancel_pending(vpninfo)) {
-			ret = -EINTR;
+		ret = control->check(control->data);
+		if (ret)
 			goto abort_child;
-		}
 		if (ready && !eof && fds[0].revents) {
 			char bytes[4096];
 			ssize_t count = read(fd, bytes, sizeof(bytes));
@@ -1328,10 +1311,9 @@ static int collect_hip_report(struct openconnect_info *vpninfo, pid_t child, int
 			}
 		}
 	}
-	if (hip_cancel_pending(vpninfo)) {
-		ret = -EINTR;
+	ret = control->check(control->data);
+	if (ret)
 		goto abort_child;
-	}
 	close(fd);
 	return 0;
 
@@ -1349,31 +1331,57 @@ abort_child:
 }
 #endif
 
-static int run_hip_script(struct openconnect_info *vpninfo)
+#if !defined(_WIN32) && !defined(__native_client__)
+static void free_hip_child_environment(char **environment)
+{
+	char **entry = environment;
+	if (!entry)
+		return;
+	while (*entry)
+		free(*entry++);
+	free(environment);
+}
+
+static char **hip_child_environment(struct openconnect_info *vpninfo,
+	const struct openconnect_gp_hip_request *request)
+{
+	char **source = vpninfo->gp_hip_environment ?: environ;
+	char **environment;
+	size_t count = 0, i, used = 0;
+	while (source[count])
+		count++;
+	environment = calloc(count + 2, sizeof(char *));
+	if (!environment)
+		return NULL;
+	for (i = 0; i < count; i++) {
+		if (!strncmp(source[i], "APP_VERSION=", 12))
+			continue;
+		environment[used] = strdup(source[i]);
+		if (!environment[used++])
+			goto fail;
+	}
+	if (asprintf(&environment[used], "APP_VERSION=%s", request->client_version) < 0) {
+		environment[used] = NULL;
+		goto fail;
+	}
+	return environment;
+fail:
+	free_hip_child_environment(environment);
+	return NULL;
+}
+#endif
+
+static int run_hip_script(struct openconnect_info *vpninfo,
+	const struct openconnect_gp_hip_request *request,
+	const struct openconnect_gp_hip_control *control, struct oc_text_buf *report_buf)
 {
 #if !defined(_WIN32) && !defined(__native_client__)
 	int pipefd[2];
 	int ret;
 	pid_t child;
+	char *command;
+	char **environment;
 #endif
-
-	if (!vpninfo->csd_wrapper) {
-		/* Only warn once */
-		if (!vpninfo->last_trojan) {
-			vpn_progress(vpninfo, PRG_ERR,
-				     _("WARNING: Server asked us to submit HIP report with md5sum %s.\n"
-				       "    VPN connectivity may be disabled or limited without HIP report submission.\n    %s\n"),
-				     vpninfo->csd_token,
-#if defined(_WIN32) || defined(__native_client__)
-				     _("However, running the HIP report submission script on this platform is not yet implemented.")
-#else
-				     _("You need to provide a --csd-wrapper argument with the HIP report submission script.")
-#endif
-				);
-			/* XXX: Many GlobalProtect VPNs work fine despite allegedly requiring HIP report submission */
-		}
-		return 0;
-	}
 
 #if defined(_WIN32) || defined(__native_client__)
 	vpn_progress(vpninfo, PRG_ERR,
@@ -1385,31 +1393,42 @@ static int run_hip_script(struct openconnect_info *vpninfo)
 		     _("Trying to run HIP Trojan script '%s'.\n"),
 		     vpninfo->csd_wrapper);
 
+	command = openconnect_utf8_to_legacy(vpninfo, vpninfo->csd_wrapper);
+	if (!command)
+		return -EINVAL;
+	environment = hip_child_environment(vpninfo, request);
+	if (!environment) {
+		ret = -ENOMEM;
+		goto parent_out;
+	}
+
 #ifdef __linux__
 	if (pipe2(pipefd, O_CLOEXEC))
 #endif
 	{
 		if (pipe(pipefd)) {
 			vpn_progress(vpninfo, PRG_ERR, _("Failed to create pipe for HIP script\n"));
-			return -EPERM;
+			ret = -EPERM;
+			goto parent_out;
 		}
 		set_fd_cloexec(pipefd[0]);
 		set_fd_cloexec(pipefd[1]);
 	}
-	if (hip_cancel_pending(vpninfo)) {
+	ret = control->check(control->data);
+	if (ret) {
 		close(pipefd[0]);
 		close(pipefd[1]);
-		return -EINTR;
+		goto parent_out;
 	}
 	child = fork();
 	if (child == -1) {
 		close(pipefd[0]);
 		close(pipefd[1]);
 		vpn_progress(vpninfo, PRG_ERR, _("Failed to fork for HIP script\n"));
-		return -EPERM;
+		ret = -EPERM;
+		goto parent_out;
 	} else if (child > 0) {
 		/* in parent: read report from child */
-		struct oc_text_buf *report_buf = buf_alloc();
 		int status;
 		close(pipefd[1]);
 
@@ -1418,7 +1437,7 @@ static int run_hip_script(struct openconnect_info *vpninfo)
 		/* The child creates its own process group before dropping privileges. */
 		if (setpgid(child, child) && errno != EACCES && errno != ESRCH)
 			vpn_progress(vpninfo, PRG_DEBUG, _("Failed to set HIP script process group\n"));
-		ret = collect_hip_report(vpninfo, child, pipefd[0], report_buf, &status);
+		ret = collect_hip_script_output(vpninfo, child, pipefd[0], report_buf, &status, control);
 		if (ret == -ETIMEDOUT) {
 			vpn_progress(vpninfo, PRG_ERR, _("HIP script '%s' timed out\n"),
 					vpninfo->csd_wrapper);
@@ -1446,16 +1465,9 @@ static int run_hip_script(struct openconnect_info *vpninfo)
 				     _("HIP script '%s' completed successfully (report is %d bytes).\n"),
 				     vpninfo->csd_wrapper, report_buf->pos);
 
-			ret = check_or_submit_hip_report(vpninfo, report_buf->data, report_buf->pos);
-			if (ret < 0)
-				vpn_progress(vpninfo, PRG_ERR, _("HIP report submission failed.\n"));
-			else {
-				vpn_progress(vpninfo, PRG_INFO, _("HIP report submitted successfully.\n"));
-				ret = 0;
-			}
 		}
-		buf_free(report_buf);
-		return ret;
+
+		goto parent_out;
 	} else {
 		/* in child: run HIP script */
 		const char *hip_argv[32];
@@ -1471,60 +1483,174 @@ static int run_hip_script(struct openconnect_info *vpninfo)
 		/* The duplicated fd does not have O_CLOEXEC */
 		dup2(pipefd[1], 1);
 
+		/* This environment replacement happens only in the forked child. */
+		environ = environment;
 		if (set_csd_user(vpninfo) < 0)
-			exit(1);
+			_exit(1);
 
-		hip_argv[i++] = openconnect_utf8_to_legacy(vpninfo, vpninfo->csd_wrapper);
+		hip_argv[i++] = command;
 		hip_argv[i++] = "--client-version";
-		hip_argv[i++] = openconnect_get_gp_app_version(vpninfo);
+		hip_argv[i++] = request->client_version;
 		hip_argv[i++] = "--client-os";
-		hip_argv[i++] = gpst_os_name(vpninfo);
+		hip_argv[i++] = request->client_os;
 		hip_argv[i++] = "--os-version";
-		hip_argv[i++] = openconnect_get_gp_os_version(vpninfo);
-		if (openconnect_get_gp_host_id(vpninfo)) {
+		hip_argv[i++] = request->os_version;
+		if (request->host_id) {
 			hip_argv[i++] = "--host-id";
-			hip_argv[i++] = openconnect_get_gp_host_id(vpninfo);
+			hip_argv[i++] = request->host_id;
 		}
 		hip_argv[i++] = "--cookie";
-		hip_argv[i++] = vpninfo->cookie;
-		if (vpninfo->ip_info.addr) {
+		hip_argv[i++] = request->cookie;
+		if (request->client_ip) {
 			hip_argv[i++] = "--client-ip";
-			hip_argv[i++] = vpninfo->ip_info.addr;
+			hip_argv[i++] = request->client_ip;
 		}
-		if (vpninfo->ip_info.addr6) {
+		if (request->client_ipv6) {
 			hip_argv[i++] = "--client-ipv6";
-			hip_argv[i++] = vpninfo->ip_info.addr6;
+			hip_argv[i++] = request->client_ipv6;
 		}
 		hip_argv[i++] = "--md5";
-		hip_argv[i++] = vpninfo->csd_token;
+		hip_argv[i++] = request->md5;
 		hip_argv[i++] = NULL;
 
-		/* XX: Sending the above parameters as --long-options was a mistake that was
-		 * based on overly-close replication of the invocation of the CSD script/binary
-		 * (see auth.c). In the case of CSD, some parameters *need* to be sent on the
-		 * command line to maintain compatibility with opaque Cisco CSD binaries.
-		 *
-		 * For GlobalProtect/HIP, we have no need to maintain compatibility with any
-		 * opaque binaries sent by the server.
-		 *
-		 * For anything that hasn't already shipped in a released version, we should use
-		 * environment variables as the standard way to send values to the HIP script,
-		 * particularly because it makes it easier for a shell script to parse them and
-		 * accept new ones.
-		 */
-		unsetenv("APP_VERSION");
-		if (setenv("APP_VERSION", openconnect_get_gp_app_version(vpninfo), 1))
-			goto out;
-
-		execv(hip_argv[0], (char **)hip_argv);
-
-	out:
-		vpn_progress(vpninfo, PRG_ERR,
-				 _("Failed to exec HIP script %s\n"), hip_argv[0]);
-		exit(1);
+		if (vpninfo->gp_hip_cwd && chdir(vpninfo->gp_hip_cwd))
+			_exit(1);
+		execve(hip_argv[0], (char **)hip_argv, environ);
+		/* No callbacks or atexit handlers may run in the forked child. */
+		_exit(1);
 	}
 
+parent_out:
+	if (command != vpninfo->csd_wrapper)
+		free(command);
+	free_hip_child_environment(environment);
+	return ret;
 #endif /* !_WIN32 && !__native_client__ */
+}
+
+struct hip_invocation {
+	struct openconnect_info *vpninfo;
+	struct timespec start;
+	const struct openconnect_gp_hip_control *external;
+};
+
+static int hip_invocation_check(void *data)
+{
+	struct hip_invocation *invocation = data;
+	struct timespec now;
+	long long elapsed;
+	int ret;
+#if !defined(_WIN32) && !defined(__native_client__)
+	if (hip_cancel_pending(invocation->vpninfo))
+		return -EINTR;
+#endif
+	if (clock_gettime(CLOCK_MONOTONIC, &now))
+		return -errno;
+	elapsed = (now.tv_sec - invocation->start.tv_sec) * 1000000000LL +
+		now.tv_nsec - invocation->start.tv_nsec;
+	if (elapsed >= HIP_REPORT_TIMEOUT_SEC * 1000000000LL)
+		return -ETIMEDOUT;
+	if (invocation->external) {
+		ret = invocation->external->check(invocation->external->data);
+		if (ret)
+			return ret;
+	}
+	return 0;
+}
+
+int openconnect_collect_gp_hip_report(struct openconnect_info *vpninfo,
+		const struct openconnect_gp_hip_request *request,
+		const struct openconnect_gp_hip_control *external,
+		char *output, size_t capacity, size_t *written)
+{
+	struct hip_invocation invocation = { .vpninfo = vpninfo, .external = external };
+	struct openconnect_gp_hip_control control = { .data = &invocation, .check = hip_invocation_check };
+	struct oc_text_buf *report;
+	int ret;
+
+	if (!written || !request)
+		return -EINVAL;
+	*written = 0;
+	if (!output || !capacity || capacity > HIP_REPORT_MAX_SIZE)
+		return -EINVAL;
+	if (clock_gettime(CLOCK_MONOTONIC, &invocation.start))
+		return -errno;
+	ret = control.check(control.data);
+	if (ret)
+		return ret;
+	if (vpninfo->csd_wrapper) {
+		if (vpninfo->gp_hip_validate) {
+			ret = vpninfo->gp_hip_validate(vpninfo->gp_hip_validate_data, &control);
+			if (ret)
+				return ret;
+		}
+		ret = control.check(control.data);
+		if (ret)
+			return ret;
+		report = buf_alloc();
+		if (!report)
+			return -ENOMEM;
+		ret = run_hip_script(vpninfo, request, &control, report);
+		if (!ret) {
+			if (report->pos > capacity)
+				ret = -E2BIG;
+			else {
+				if (report->pos)
+					memcpy(output, report->data, report->pos);
+				*written = report->pos;
+			}
+		}
+		buf_free(report);
+	} else if (vpninfo->gp_hip_generate) {
+		ret = vpninfo->gp_hip_generate(vpninfo->gp_hip_generate_data, request,
+					     &control, output, capacity, written);
+	} else
+		return -ENOENT;
+	if (ret)
+		return ret;
+	ret = control.check(control.data);
+	if (ret)
+		return ret;
+	if (*written > capacity)
+		return -E2BIG;
+	if (!*written || memchr(output, 0, *written))
+		return -EINVAL;
+	output[*written] = 0;
+	return 0;
+}
+
+static int generate_and_submit_hip_report(struct openconnect_info *vpninfo)
+{
+	struct openconnect_gp_hip_request request = {
+		.cookie = vpninfo->cookie,
+		.client_ip = vpninfo->ip_info.addr,
+		.client_ipv6 = vpninfo->ip_info.addr6,
+		.md5 = vpninfo->csd_token,
+		.client_version = openconnect_get_gp_app_version(vpninfo),
+		.client_os = gpst_os_name(vpninfo),
+		.os_version = openconnect_get_gp_os_version(vpninfo),
+		.host_id = openconnect_get_gp_host_id(vpninfo),
+		.local_hostname = vpninfo->localname,
+	};
+	char *report;
+	size_t length;
+	int ret;
+
+	if (!vpninfo->csd_wrapper && !vpninfo->gp_hip_generate) {
+		if (!vpninfo->last_trojan)
+			vpn_progress(vpninfo, PRG_ERR,
+				     _("Gateway requested a HIP report but no provider is configured.\n"));
+		return 0;
+	}
+	report = malloc(HIP_REPORT_MAX_SIZE + 1);
+	if (!report)
+		return -ENOMEM;
+	ret = openconnect_collect_gp_hip_report(vpninfo, &request, NULL, report,
+					      HIP_REPORT_MAX_SIZE, &length);
+	if (!ret)
+		ret = check_or_submit_hip_report(vpninfo, report, length);
+	free(report);
+	return ret;
 }
 
 static int check_and_maybe_submit_hip_report(struct openconnect_info *vpninfo)
@@ -1535,7 +1661,7 @@ static int check_and_maybe_submit_hip_report(struct openconnect_info *vpninfo)
 	if (ret == -EAGAIN) {
 		vpn_progress(vpninfo, PRG_DEBUG,
 					 _("Gateway says HIP report submission is needed.\n"));
-		ret = run_hip_script(vpninfo);
+		ret = generate_and_submit_hip_report(vpninfo);
 	} else if (ret == 0)
 		vpn_progress(vpninfo, PRG_DEBUG,
 					 _("Gateway says no HIP report submission is needed.\n"));
@@ -1730,7 +1856,6 @@ int gpst_mainloop(struct openconnect_info *vpninfo, int *timeout, int readable)
 		return 1;
 	}
 
-
 	/* If SSL_write() fails we are expected to try again. With exactly
 	   the same data, at exactly the same location. So we keep the
 	   packet we had before.... */
@@ -1826,7 +1951,6 @@ int gpst_mainloop(struct openconnect_info *vpninfo, int *timeout, int readable)
 		vpninfo->current_ssl_pkt = (struct pkt *)&dpd_pkt;
 		goto handle_outgoing;
 	}
-
 
 	/* Service outgoing packet queue */
 	while (vpninfo->dtls_state != DTLS_ESTABLISHED &&

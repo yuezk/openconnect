@@ -19,6 +19,7 @@
 #include <config.h>
 
 #include "openconnect-internal.h"
+#include <pwd.h>
 
 #if defined(OPENCONNECT_GNUTLS)
 #include "gnutls.h"
@@ -637,7 +638,6 @@ const char *add_option_ipaddr(struct oc_vpn_option **list,
 	return add_option_dup(list, opt, buf, -1);
 }
 
-
 void free_optlist(struct oc_vpn_option *opt)
 {
 	struct oc_vpn_option *next;
@@ -712,7 +712,7 @@ int install_vpn_opts(struct openconnect_info *vpninfo, struct oc_vpn_option *opt
 		}
 	}
 
- after_ip_checks:
+	after_ip_checks:
 	/* Preserve gateway_addr and MTU if they were set */
 	ip_info->gateway_addr = vpninfo->ip_info.gateway_addr;
 	if (!ip_info->mtu)
@@ -769,8 +769,11 @@ static void free_certinfo(struct cert_info *certinfo)
 	free_pass(&certinfo->password);
 }
 
+static void free_hip_environment(struct openconnect_info *vpninfo);
+
 void openconnect_vpninfo_free(struct openconnect_info *vpninfo)
 {
+	free_hip_environment(vpninfo);
 	openconnect_close_https(vpninfo, 1);
 	if (vpninfo->proto && vpninfo->proto->udp_shutdown)
 		vpninfo->proto->udp_shutdown(vpninfo);
@@ -960,7 +963,6 @@ void openconnect_vpninfo_free(struct openconnect_info *vpninfo)
 	free(vpninfo);
 }
 
-
 const char *openconnect_get_connect_url(struct openconnect_info *vpninfo)
 {
 	struct oc_text_buf *urlbuf = vpninfo->connect_urlbuf;
@@ -1067,6 +1069,71 @@ int openconnect_set_gp_host_id(struct openconnect_info *vpninfo,
 	UTF8CHECK(gp_host_id);
 
 	STRDUP(vpninfo->gp_host_id, gp_host_id);
+	return 0;
+}
+
+void openconnect_set_gp_hip_generator(struct openconnect_info *vpninfo, void *data,
+	openconnect_gp_hip_generate_fn callback)
+{
+	vpninfo->gp_hip_generate_data = data;
+	vpninfo->gp_hip_generate = callback;
+}
+
+static void free_hip_environment(struct openconnect_info *vpninfo)
+{
+	char **entry = vpninfo->gp_hip_environment;
+	if (entry) {
+		while (*entry)
+			free(*entry++);
+		free(vpninfo->gp_hip_environment);
+		vpninfo->gp_hip_environment = NULL;
+	}
+	free(vpninfo->gp_hip_cwd);
+	vpninfo->gp_hip_cwd = NULL;
+}
+
+int openconnect_set_gp_hip_script(struct openconnect_info *vpninfo, const char *path,
+	int uid_present, uid_t uid, void *data, openconnect_gp_hip_validate_fn validate,
+	const char *const *environment, const char *cwd)
+{
+	size_t count = 0, i;
+	free_hip_environment(vpninfo);
+	STRDUP(vpninfo->csd_wrapper, path);
+	vpninfo->uid_csd_given = uid_present;
+	vpninfo->uid_csd = uid;
+	if (uid_present) {
+		struct passwd pwd, *result;
+		char buffer[16384];
+		int error = getpwuid_r(uid, &pwd, buffer, sizeof(buffer), &result);
+		if (error)
+			return -error;
+		if (!result)
+			return -ENOENT;
+		vpninfo->gid_csd = pwd.pw_gid;
+	}
+	vpninfo->gp_hip_validate = validate;
+	vpninfo->gp_hip_validate_data = data;
+	if (environment) {
+		while (environment[count])
+			count++;
+		vpninfo->gp_hip_environment = calloc(count + 1, sizeof(char *));
+		if (!vpninfo->gp_hip_environment)
+			return -ENOMEM;
+		for (i = 0; i < count; i++) {
+			vpninfo->gp_hip_environment[i] = strdup(environment[i]);
+			if (!vpninfo->gp_hip_environment[i]) {
+				free_hip_environment(vpninfo);
+				return -ENOMEM;
+			}
+		}
+	}
+	if (cwd) {
+		vpninfo->gp_hip_cwd = strdup(cwd);
+		if (!vpninfo->gp_hip_cwd) {
+			free_hip_environment(vpninfo);
+			return -ENOMEM;
+		}
+	}
 	return 0;
 }
 
