@@ -500,7 +500,11 @@ typedef int (*openconnect_gp_hip_validate_fn)(void *data,
 	const struct openconnect_gp_hip_control *control);
 void openconnect_set_gp_hip_generator(struct openconnect_info *, void *, openconnect_gp_hip_generate_fn);
 /* NULL environment inherits the process environment. An explicit environment
- * is a NULL-terminated array. It and cwd are copied by registration. */
+ * is a NULL-terminated array. Path, environment and cwd are copied.
+ * Registration failure leaves the previous script policy unchanged.
+ * Successful registration replaces its user, validator, environment and cwd.
+ * The legacy openconnect_setup_csd() API replaces this policy with a legacy
+ * script configuration without a HIP validator or explicit environment/cwd. */
 int openconnect_set_gp_hip_script(struct openconnect_info *, const char *path,
 	int uid_present, uid_t uid, void *data, openconnect_gp_hip_validate_fn,
 	const char *const *environment, const char *cwd);

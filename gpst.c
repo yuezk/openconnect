@@ -1581,8 +1581,11 @@ int openconnect_collect_gp_hip_report(struct openconnect_info *vpninfo,
 	if (vpninfo->csd_wrapper) {
 		if (vpninfo->gp_hip_validate) {
 			ret = vpninfo->gp_hip_validate(vpninfo->gp_hip_validate_data, &control);
-			if (ret)
+			if (ret) {
+				vpn_progress(vpninfo, PRG_ERR,
+					     _("HIP script validation failed: %s\n"), strerror(-ret));
 				return ret;
+			}
 		}
 		ret = control.check(control.data);
 		if (ret)
@@ -1604,6 +1607,23 @@ int openconnect_collect_gp_hip_report(struct openconnect_info *vpninfo,
 	} else if (vpninfo->gp_hip_generate) {
 		ret = vpninfo->gp_hip_generate(vpninfo->gp_hip_generate_data, request,
 					     &control, output, capacity, written);
+		switch (ret) {
+		case 0:
+			break;
+		case -E2BIG:
+			vpn_progress(vpninfo, PRG_ERR,
+				     _("HIP report generation exceeded the %zu-byte output limit.\n"), capacity);
+			break;
+		case -ETIMEDOUT:
+			vpn_progress(vpninfo, PRG_ERR, _("HIP report generation timed out.\n"));
+			break;
+		case -EINTR:
+			vpn_progress(vpninfo, PRG_INFO, _("HIP report generation canceled.\n"));
+			break;
+		default:
+			vpn_progress(vpninfo, PRG_ERR,
+				     _("HIP report generation failed: %s\n"), strerror(-ret));
+		}
 	} else
 		return -ENOENT;
 	if (ret)
@@ -1611,10 +1631,19 @@ int openconnect_collect_gp_hip_report(struct openconnect_info *vpninfo,
 	ret = control.check(control.data);
 	if (ret)
 		return ret;
-	if (*written > capacity)
+	if (*written > capacity) {
+		vpn_progress(vpninfo, PRG_ERR,
+			     _("HIP report exceeds the %zu-byte output limit.\n"), capacity);
 		return -E2BIG;
-	if (!*written || memchr(output, 0, *written))
+	}
+	if (!*written) {
+		vpn_progress(vpninfo, PRG_ERR, _("HIP report is empty.\n"));
 		return -EINVAL;
+	}
+	if (memchr(output, 0, *written)) {
+		vpn_progress(vpninfo, PRG_ERR, _("HIP report contains an embedded NUL byte.\n"));
+		return -EINVAL;
+	}
 	output[*written] = 0;
 	return 0;
 }
@@ -1639,7 +1668,8 @@ static int generate_and_submit_hip_report(struct openconnect_info *vpninfo)
 	if (!vpninfo->csd_wrapper && !vpninfo->gp_hip_generate) {
 		if (!vpninfo->last_trojan)
 			vpn_progress(vpninfo, PRG_ERR,
-				     _("Gateway requested a HIP report but no provider is configured.\n"));
+				     _("Gateway requested a HIP report, but HIP reporting is not configured.\n"
+				       "VPN connectivity may be disabled or limited without HIP report submission.\n"));
 		return 0;
 	}
 	report = malloc(HIP_REPORT_MAX_SIZE + 1);
@@ -1647,8 +1677,13 @@ static int generate_and_submit_hip_report(struct openconnect_info *vpninfo)
 		return -ENOMEM;
 	ret = openconnect_collect_gp_hip_report(vpninfo, &request, NULL, report,
 					      HIP_REPORT_MAX_SIZE, &length);
-	if (!ret)
+	if (!ret) {
 		ret = check_or_submit_hip_report(vpninfo, report, length);
+		if (ret)
+			vpn_progress(vpninfo, PRG_ERR, _("HIP report submission failed: %s\n"), strerror(-ret));
+		else
+			vpn_progress(vpninfo, PRG_INFO, _("HIP report submitted successfully.\n"));
+	}
 	free(report);
 	return ret;
 }

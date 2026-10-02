@@ -19,7 +19,9 @@
 #include <config.h>
 
 #include "openconnect-internal.h"
+#if !defined(_WIN32) && !defined(__native_client__)
 #include <pwd.h>
+#endif
 
 #if defined(OPENCONNECT_GNUTLS)
 #include "gnutls.h"
@@ -1096,45 +1098,89 @@ int openconnect_set_gp_hip_script(struct openconnect_info *vpninfo, const char *
 	int uid_present, uid_t uid, void *data, openconnect_gp_hip_validate_fn validate,
 	const char *const *environment, const char *cwd)
 {
-	size_t count = 0, i;
+#if defined(_WIN32) || defined(__native_client__)
+	if (path) {
+		vpn_progress(vpninfo, PRG_ERR,
+			     _("HIP script execution is not supported on this platform.\n"));
+		return -EOPNOTSUPP;
+	}
+	free(vpninfo->csd_wrapper);
+	vpninfo->csd_wrapper = NULL;
 	free_hip_environment(vpninfo);
-	STRDUP(vpninfo->csd_wrapper, path);
-	vpninfo->uid_csd_given = uid_present;
-	vpninfo->uid_csd = uid;
+	vpninfo->gp_hip_validate = NULL;
+	vpninfo->gp_hip_validate_data = NULL;
+	return 0;
+#else
+	char *new_path = NULL, *new_cwd = NULL;
+	char **new_environment = NULL;
+	size_t count = 0, i;
+	gid_t gid = 0;
+	int ret = -ENOMEM;
+
 	if (uid_present) {
 		struct passwd pwd, *result;
 		char buffer[16384];
 		int error = getpwuid_r(uid, &pwd, buffer, sizeof(buffer), &result);
-		if (error)
-			return -error;
-		if (!result)
-			return -ENOENT;
-		vpninfo->gid_csd = pwd.pw_gid;
+		if (error || !result) {
+			ret = error ? -error : -ENOENT;
+			if (error)
+				vpn_progress(vpninfo, PRG_ERR,
+					     _("Failed to look up HIP script user %lu: %s\n"),
+					     (unsigned long)uid, strerror(error));
+			else
+				vpn_progress(vpninfo, PRG_ERR,
+					     _("HIP script user %lu does not exist.\n"), (unsigned long)uid);
+			return ret;
+		}
+		gid = pwd.pw_gid;
 	}
-	vpninfo->gp_hip_validate = validate;
-	vpninfo->gp_hip_validate_data = data;
+	if (path) {
+		new_path = strdup(path);
+		if (!new_path)
+			goto fail;
+	}
 	if (environment) {
 		while (environment[count])
 			count++;
-		vpninfo->gp_hip_environment = calloc(count + 1, sizeof(char *));
-		if (!vpninfo->gp_hip_environment)
-			return -ENOMEM;
+		new_environment = calloc(count + 1, sizeof(char *));
+		if (!new_environment)
+			goto fail;
 		for (i = 0; i < count; i++) {
-			vpninfo->gp_hip_environment[i] = strdup(environment[i]);
-			if (!vpninfo->gp_hip_environment[i]) {
-				free_hip_environment(vpninfo);
-				return -ENOMEM;
-			}
+			new_environment[i] = strdup(environment[i]);
+			if (!new_environment[i])
+				goto fail;
 		}
 	}
 	if (cwd) {
-		vpninfo->gp_hip_cwd = strdup(cwd);
-		if (!vpninfo->gp_hip_cwd) {
-			free_hip_environment(vpninfo);
-			return -ENOMEM;
-		}
+		new_cwd = strdup(cwd);
+		if (!new_cwd)
+			goto fail;
 	}
+
+	/* Replace the complete policy only after all fallible work succeeds. */
+	free(vpninfo->csd_wrapper);
+	free_hip_environment(vpninfo);
+	vpninfo->csd_wrapper = new_path;
+	vpninfo->uid_csd_given = uid_present;
+	vpninfo->uid_csd = uid;
+	vpninfo->gid_csd = gid;
+	vpninfo->gp_hip_validate = validate;
+	vpninfo->gp_hip_validate_data = data;
+	vpninfo->gp_hip_environment = new_environment;
+	vpninfo->gp_hip_cwd = new_cwd;
 	return 0;
+
+fail:
+	if (new_environment) {
+		for (i = 0; new_environment[i]; i++)
+			free(new_environment[i]);
+		free(new_environment);
+	}
+	free(new_path);
+	free(new_cwd);
+	vpn_progress(vpninfo, PRG_ERR, _("Failed to allocate HIP script configuration.\n"));
+	return ret;
+#endif
 }
 
 void openconnect_set_gp_hip_report_callback(struct openconnect_info *vpninfo,
@@ -1314,13 +1360,27 @@ int openconnect_get_ip_info(struct openconnect_info *vpninfo,
 int openconnect_setup_csd(struct openconnect_info *vpninfo, uid_t uid,
 			  int silent, const char *wrapper)
 {
+#if !defined(_WIN32) && !defined(__native_client__)
+	/* The legacy API replaces the complete policy and resolves the new group. */
+	return openconnect_set_gp_hip_script(vpninfo, wrapper, silent ? 2 : 1,
+					     uid, NULL, NULL, NULL, NULL);
+#else
+	char *new_wrapper = wrapper ? strdup(wrapper) : NULL;
+	if (wrapper && !new_wrapper)
+		return -ENOMEM;
+
+	/* Legacy CSD registration replaces any HIP-specific script policy. */
+	free(vpninfo->csd_wrapper);
+	free_hip_environment(vpninfo);
+	vpninfo->gp_hip_validate = NULL;
+	vpninfo->gp_hip_validate_data = NULL;
+	vpninfo->csd_wrapper = new_wrapper;
 #ifndef _WIN32
 	vpninfo->uid_csd = uid;
 	vpninfo->uid_csd_given = silent ? 2 : 1;
 #endif
-	STRDUP(vpninfo->csd_wrapper, wrapper);
-
 	return 0;
+#endif
 }
 
 void openconnect_set_xmlpost(struct openconnect_info *vpninfo, int enable)
