@@ -591,7 +591,7 @@ void os_shutdown_tun(struct openconnect_info *vpninfo)
 	shutdown_vhost(vpninfo);
 #endif
 
-	if (vpninfo->vpnc_script)
+	if (vpninfo->vpnc_script || vpninfo->configure_tun)
 		close(vpninfo->tun_fd);
 	vpninfo->tun_fd = -1;
 }

@@ -601,6 +601,8 @@ struct openconnect_info {
 	struct oc_vpn_option *dtls_options;
 
 	struct oc_vpn_option *script_env;
+	openconnect_configure_tun_fn configure_tun;
+	void *configure_tun_data;
 	struct oc_vpn_option *csd_env;
 
 	unsigned pfs;

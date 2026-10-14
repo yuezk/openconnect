@@ -879,6 +879,15 @@ typedef int (*openconnect_getaddrinfo_vfn) (void *privdata, const char *node, co
 					    const struct addrinfo *hints, struct addrinfo **res);
 void openconnect_override_getaddrinfo(struct openconnect_info *vpninfo, openconnect_getaddrinfo_vfn gai_fn);
 
+/* Replaces vpnc-script configuration, but does not replace tunnel packet I/O.
+ * Called synchronously in the parent process with a borrowed environment list.
+ * Return zero on success or a negative errno on failure. Never mutate env or
+ * the process environment; value == NULL denotes an unset variable. */
+typedef int (*openconnect_configure_tun_fn)(void *data, const char *reason,
+                                          const struct oc_vpn_option *env);
+void openconnect_set_configure_tun_handler(struct openconnect_info *vpninfo,
+                                          void *data, openconnect_configure_tun_fn handler);
+
 /* Callback for configuring the interface after tunnel is fully up. */
 typedef void (*openconnect_setup_tun_vfn) (void *privdata);
 void openconnect_set_setup_tun_handler(struct openconnect_info *vpninfo,

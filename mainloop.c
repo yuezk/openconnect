@@ -112,6 +112,10 @@ static int setup_tun_device(struct openconnect_info *vpninfo)
 		vpninfo->setup_tun(vpninfo->cbdata);
 		if (tun_is_up(vpninfo))
 			return 0;
+		/* A callback configuration failure must not retry device setup via
+		 * the legacy path or report the connection as successful. */
+		if (vpninfo->configure_tun)
+			return -EIO;
 	}
 
 #ifndef _WIN32

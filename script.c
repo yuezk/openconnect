@@ -574,6 +574,15 @@ int script_config_tun(struct openconnect_info *vpninfo, const char *reason)
 	STARTUPINFOW si;
 	DWORD cpflags, exit_status;
 
+	if (vpninfo->configure_tun && !vpninfo->script_tun) {
+		ret = vpninfo->configure_tun(vpninfo->configure_tun_data, reason,
+		                            vpninfo->script_env);
+		if (ret)
+			vpn_progress(vpninfo, PRG_ERR,
+			             _("Network configuration callback failed for %s: %d\n"), reason, ret);
+		return ret;
+	}
+
 	if (!vpninfo->vpnc_script || vpninfo->script_tun)
 		return 0;
 
@@ -671,6 +680,15 @@ int script_config_tun(struct openconnect_info *vpninfo, const char *reason)
 {
 	int ret;
 	pid_t pid;
+
+	if (vpninfo->configure_tun && !vpninfo->script_tun) {
+		ret = vpninfo->configure_tun(vpninfo->configure_tun_data, reason,
+		                            vpninfo->script_env);
+		if (ret)
+			vpn_progress(vpninfo, PRG_ERR,
+			             _("Network configuration callback failed for %s: %d\n"), reason, ret);
+		return ret;
+	}
 
 	if (!vpninfo->vpnc_script || vpninfo->script_tun)
 		return 0;

@@ -1750,6 +1750,13 @@ void openconnect_override_getaddrinfo(struct openconnect_info *vpninfo, openconn
 	vpninfo->getaddrinfo_override = gai_fn;
 }
 
+void openconnect_set_configure_tun_handler(struct openconnect_info *vpninfo,
+                                          void *data, openconnect_configure_tun_fn handler)
+{
+	vpninfo->configure_tun = handler;
+	vpninfo->configure_tun_data = data;
+}
+
 void openconnect_set_setup_tun_handler(struct openconnect_info *vpninfo,
 				       openconnect_setup_tun_vfn setup_tun)
 {
@@ -1773,6 +1780,7 @@ int openconnect_setup_tun_device(struct openconnect_info *vpninfo,
 				 const char *vpnc_script, const char *ifname)
 {
 	intptr_t tun_fd;
+	int ret;
 	char *legacy_ifname;
 
 	UTF8CHECK(vpnc_script);
@@ -1790,7 +1798,9 @@ int openconnect_setup_tun_device(struct openconnect_info *vpninfo,
 	if (legacy_ifname != vpninfo->ifname)
 		free(legacy_ifname);
 
-	script_config_tun(vpninfo, "pre-init");
+	ret = script_config_tun(vpninfo, "pre-init");
+	if (ret && vpninfo->configure_tun)
+		return ret;
 
 	tun_fd = os_setup_tun(vpninfo);
 	if (tun_fd < 0)
@@ -1807,8 +1817,18 @@ int openconnect_setup_tun_device(struct openconnect_info *vpninfo,
 	if (legacy_ifname != vpninfo->ifname)
 		free(legacy_ifname);
 
-	script_config_tun(vpninfo, "connect");
+	/* Attach first for callback configuration so a failed connect can roll back
+	 * through the normal disconnect path and close the owned device. */
+	if (vpninfo->configure_tun) {
+		ret = openconnect_setup_tun_fd(vpninfo, tun_fd);
+		if (!ret)
+			ret = script_config_tun(vpninfo, "connect");
+		if (ret)
+			os_shutdown_tun(vpninfo);
+		return ret;
+	}
 
+	script_config_tun(vpninfo, "connect");
 	return openconnect_setup_tun_fd(vpninfo, tun_fd);
 }
 

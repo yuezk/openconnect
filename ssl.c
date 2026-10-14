@@ -1210,8 +1210,11 @@ int ssl_reconnect(struct openconnect_info *vpninfo)
 	vpninfo->tun_pkt = NULL;
 
 	while (1) {
-		if (tun_up)
-			script_config_tun(vpninfo, "attempt-reconnect");
+		if (tun_up) {
+			ret = script_config_tun(vpninfo, "attempt-reconnect");
+			if (ret && vpninfo->configure_tun)
+				return ret;
+		}
 		ret = vpninfo->proto->tcp_connect(vpninfo);
 		if (!ret)
 			break;
@@ -1238,7 +1241,9 @@ int ssl_reconnect(struct openconnect_info *vpninfo)
 	}
 
 	if (tun_up) {
-		script_config_tun(vpninfo, "reconnect");
+		ret = script_config_tun(vpninfo, "reconnect");
+		if (ret && vpninfo->configure_tun)
+			return ret;
 		if (vpninfo->reconnected)
 			vpninfo->reconnected(vpninfo->cbdata);
 	}
