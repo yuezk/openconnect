@@ -241,9 +241,9 @@ struct oc_vpn_proto {
 #define OC_FORM_OPT_NUMERIC		0x0002
 
 /* char * fields are static (owned by XML parser) and don't need to be
-   freed by the form handling code — except for value, which for TEXT
-   and PASSWORD options is allocated by openconnect_set_option_value()
-   when process_form() interacts with the user and must be freed. */
+			freed by the form handling code — except for value, which for TEXT
+			and PASSWORD options is allocated by openconnect_set_option_value()
+			when process_form() interacts with the user and must be freed. */
 struct oc_form_opt {
 	struct oc_form_opt *next;
 	int type;
@@ -394,22 +394,21 @@ typedef enum {
 } oc_compression_mode_t;
 
 /* All strings are UTF-8. If operating in a legacy environment where
-   nl_langinfo(CODESET) returns anything other than UTF-8, or on Windows,
-   the library will take appropriate steps to convert back to the legacy
-   character set (or UTF-16) for file handling and wherever else it is
-   appropriate to do so. Library functions may (but probably don't yet)
-   return -EILSEQ if passed invalid UTF-8 strings. */
+			nl_langinfo(CODESET) returns anything other than UTF-8, or on Windows,
+			the library will take appropriate steps to convert back to the legacy
+			character set (or UTF-16) for file handling and wherever else it is
+			appropriate to do so. Library functions may (but probably don't yet)
+			return -EILSEQ if passed invalid UTF-8 strings. */
 
 /* Unlike previous versions of openconnect, no functions will take ownership
-   of the provided strings. */
-
+			of the provided strings. */
 
 /* Provide environment variables to be set in the CSD trojan environment
-   before spawning it. Some callers may need to set $TMPDIR, $PATH and
-   other such things if not running from a standard UNIX-like environment.
-   To ensure that a variable is unset, pass its name with value==NULL.
-   To clear all settings and allow the CSD trojan to inherit an unmodified
-   environment, call with name==NULL. */
+			before spawning it. Some callers may need to set $TMPDIR, $PATH and
+			other such things if not running from a standard UNIX-like environment.
+			To ensure that a variable is unset, pass its name with value==NULL.
+			To clear all settings and allow the CSD trojan to inherit an unmodified
+			environment, call with name==NULL. */
 
 int openconnect_set_csd_environ(struct openconnect_info *vpninfo,
 				const char *name, const char *value);
@@ -435,27 +434,27 @@ int openconnect_check_peer_cert_hash(struct openconnect_info *vpninfo,
 				     const char *old_hash);
 
 /* The buffers returned by these two functions must be freed with
-   openconnect_free_cert_info(), especially on Windows. */
+			openconnect_free_cert_info(), especially on Windows. */
 char *openconnect_get_peer_cert_details(struct openconnect_info *vpninfo);
 
 /* Returns the length of the created DER output, in a newly-allocated buffer
-   that will need to be freed by openconnect_free_cert_info(). */
+			that will need to be freed by openconnect_free_cert_info(). */
 int openconnect_get_peer_cert_DER(struct openconnect_info *vpninfo,
 				  unsigned char **buf);
 void openconnect_free_cert_info(struct openconnect_info *vpninfo,
 				void *buf);
 
 /* Creates a list of all certs in the peer's chain, returning the
-   number of certs in the chain (or <0 on error). Only valid inside the
-   validate_peer_cert callback. The caller should free the chain,
-   but should not modify the contents. */
+			number of certs in the chain (or <0 on error). Only valid inside the
+			validate_peer_cert callback. The caller should free the chain,
+			but should not modify the contents. */
 int openconnect_get_peer_cert_chain(struct openconnect_info *vpninfo,
 				    struct oc_cert **chain);
 void openconnect_free_peer_cert_chain(struct openconnect_info *vpninfo,
 				      struct oc_cert *chain);
 
 /* Contains a comma-separated list of authentication methods to enabled.
-   Currently supported: Negotiate,NTLM,Digest,Basic */
+			Currently supported: Negotiate,NTLM,Digest,Basic */
 int openconnect_set_http_auth(struct openconnect_info *vpninfo,
 			      const char *methods);
 int openconnect_set_proxy_auth(struct openconnect_info *vpninfo,
@@ -469,6 +468,51 @@ int openconnect_set_http_proxy(struct openconnect_info *vpninfo,
  * require an *exact* match. */
 int openconnect_set_useragent(struct openconnect_info *vpninfo,
 			      const char *useragent);
+
+int openconnect_set_gp_app_version(struct openconnect_info *vpninfo,
+				   const char *gp_app_version);
+int openconnect_set_gp_os_version(struct openconnect_info *vpninfo,
+				  const char *gp_os_version);
+int openconnect_set_gp_host_id(struct openconnect_info *vpninfo,
+			       const char *gp_host_id);
+/* Called only after the gateway accepts a HIP report. The report is borrowed
+ * for the duration of the callback; callers must copy it to retain it. */
+typedef void (*openconnect_gp_hip_report_vfn)(void *data, const char *report, size_t length);
+void openconnect_set_gp_hip_report_callback(struct openconnect_info *vpninfo,
+					    void *data, openconnect_gp_hip_report_vfn callback);
+
+/* Inputs and control are borrowed only during generation or script validation.
+ * check returns zero or a negative errno (including EINTR and ETIMEDOUT).
+ * output_capacity excludes the additional terminator byte owned by the caller. */
+struct openconnect_gp_hip_request {
+	const char *cookie, *client_ip, *client_ipv6, *md5;
+	const char *client_version, *client_os, *os_version, *host_id, *local_hostname;
+};
+struct openconnect_gp_hip_control {
+	void *data;
+	int (*check)(void *data);
+};
+typedef int (*openconnect_gp_hip_generate_fn)(void *data,
+	const struct openconnect_gp_hip_request *request,
+	const struct openconnect_gp_hip_control *control,
+	char *output, size_t capacity, size_t *written);
+typedef int (*openconnect_gp_hip_validate_fn)(void *data,
+	const struct openconnect_gp_hip_control *control);
+void openconnect_set_gp_hip_generator(struct openconnect_info *, void *, openconnect_gp_hip_generate_fn);
+/* NULL environment inherits the process environment. An explicit environment
+ * is a NULL-terminated array. Path, environment and cwd are copied.
+ * Registration failure leaves the previous script policy unchanged.
+ * Successful registration replaces its user, validator, environment and cwd.
+ * The legacy openconnect_setup_csd() API replaces this policy with a legacy
+ * script configuration without a HIP validator or explicit environment/cwd. */
+int openconnect_set_gp_hip_script(struct openconnect_info *, const char *path,
+	int uid_present, uid_t uid, void *data, openconnect_gp_hip_validate_fn,
+	const char *const *environment, const char *cwd);
+/* Collect without contacting a gateway, using the same bounded provider path.
+ * output must have capacity+1 bytes; written excludes the terminator. */
+int openconnect_collect_gp_hip_report(struct openconnect_info *,
+	const struct openconnect_gp_hip_request *, const struct openconnect_gp_hip_control *,
+	char *output, size_t capacity, size_t *written);
 
 int openconnect_passphrase_from_fsid(struct openconnect_info *vpninfo);
 int openconnect_obtain_cookie(struct openconnect_info *vpninfo);
@@ -486,7 +530,6 @@ const char *openconnect_get_dtls_cipher(struct openconnect_info *);
  * in use (LZS, LZ4, ...). If no compression then NULL is returned. */
 const char *openconnect_get_cstp_compression(struct openconnect_info *);
 const char *openconnect_get_dtls_compression(struct openconnect_info *);
-
 
 /*
  * Since authentication can run in a separate environment to the connection
@@ -612,7 +655,7 @@ int openconnect_set_compression_mode(struct openconnect_info *,
 				     oc_compression_mode_t);
 
 /* The size must be 41 bytes, since that's the size of a 20-byte SHA1
-   represented as hex with a trailing NUL. */
+			represented as hex with a trailing NUL. */
 void openconnect_set_xmlsha1(struct openconnect_info *, const char *, int size);
 
 int openconnect_set_cafile(struct openconnect_info *, const char *);
@@ -628,8 +671,8 @@ int openconnect_setup_csd(struct openconnect_info *, uid_t, int silent, const ch
 void openconnect_set_xmlpost(struct openconnect_info *, int enable);
 
 /* Valid choices are: "linux", "linux-64", "win", "mac-intel",
-   "android", and "apple-ios". This also selects the corresponding CSD
-   trojan binary. */
+			"android", and "apple-ios". This also selects the corresponding CSD
+			trojan binary. */
 int openconnect_set_reported_os(struct openconnect_info *, const char *os);
 
 int openconnect_set_version_string(struct openconnect_info *vpninfo,
@@ -655,11 +698,17 @@ void openconnect_set_dpd(struct openconnect_info *, int min_seconds);
 void openconnect_set_trojan_interval(struct openconnect_info *, int seconds);
 int openconnect_get_idle_timeout(struct openconnect_info *);
 time_t openconnect_get_auth_expiration(struct openconnect_info *);
+int openconnect_get_gp_session_lifetime(struct openconnect_info *);
+time_t openconnect_get_gp_user_expires(struct openconnect_info *);
+int openconnect_get_gp_lifetime_notify_prior(struct openconnect_info *);
+const char *openconnect_get_gp_lifetime_notify_message(struct openconnect_info *);
+int openconnect_get_gp_nlb_enabled(struct openconnect_info *);
+const char *openconnect_get_gp_nlb_connected_gw_ip(struct openconnect_info *);
 
 /* The returned structures are owned by the library and may be freed/replaced
-   due to rekey or reconnect. Assume that once the mainloop starts, the
-   pointers are no longer valid. For similar reasons, it is unsafe to call
-   this function from another thread. */
+			due to rekey or reconnect. Assume that once the mainloop starts, the
+			pointers are no longer valid. For similar reasons, it is unsafe to call
+			this function from another thread. */
 int openconnect_get_ip_info(struct openconnect_info *,
 			    const struct oc_ip_info **info,
 			    const struct oc_vpn_option **cstp_options,
@@ -680,20 +729,20 @@ void openconnect_set_pfs(struct openconnect_info *vpninfo, unsigned val);
 int openconnect_set_allow_insecure_crypto(struct openconnect_info *vpninfo, unsigned val);
 
 /* If this is set, then openconnect_obtain_cookie() will abort and return
-   failure if the file descriptor is readable. Typically a user may create
-   a pair of pipes with the pipe(2) system call, hand the readable one to
-   this function, and then write a byte to the other end if it ever wants
-   to cancel the connection. This way, a multi-threaded UI (which will be
-   running openconnect_obtain_cookie() in a separate thread since it blocks)
-   has the ability to cancel that call, reap its thread and free the
-   vpninfo structure (or retry). An 'fd' argument of -1 will render the
-   cancellation mechanism inactive. */
+			failure if the file descriptor is readable. Typically a user may create
+			a pair of pipes with the pipe(2) system call, hand the readable one to
+			this function, and then write a byte to the other end if it ever wants
+			to cancel the connection. This way, a multi-threaded UI (which will be
+			running openconnect_obtain_cookie() in a separate thread since it blocks)
+			has the ability to cancel that call, reap its thread and free the
+			vpninfo structure (or retry). An 'fd' argument of -1 will render the
+			cancellation mechanism inactive. */
 void openconnect_set_cancel_fd(struct openconnect_info *vpninfo, int fd);
 
 /* Create a nonblocking pipe used to send cancellations and other commands
-   to the library. This returns a file descriptor to the write side of
-   the pipe. Both sides will be closed by openconnect_vpninfo_free().
-   This replaces openconnect_set_cancel_fd(). */
+			to the library. This returns a file descriptor to the write side of
+			the pipe. Both sides will be closed by openconnect_vpninfo_free().
+			This replaces openconnect_set_cancel_fd(). */
 #ifdef _WIN32
 SOCKET
 #else
@@ -707,7 +756,7 @@ const char *openconnect_get_version(void);
 int openconnect_make_cstp_connection(struct openconnect_info *vpninfo);
 
 /* Create a tun device through the OS kernel (typical use case). Both
-   strings are optional and can be NULL if desired. */
+			strings are optional and can be NULL if desired. */
 int openconnect_setup_tun_device(struct openconnect_info *vpninfo,
 				 const char *vpnc_script, const char *ifname);
 
@@ -726,32 +775,32 @@ int openconnect_setup_tun_fd(struct openconnect_info *vpninfo, int tun_fd);
 int openconnect_setup_dtls(struct openconnect_info *vpninfo, int dtls_attempt_period);
 
 /* Start the main loop; exits if OC_CMD_CANCEL is received on cmd_fd or
-   the remote site aborts. */
+			the remote site aborts. */
 int openconnect_mainloop(struct openconnect_info *vpninfo,
 			 int reconnect_timeout,
 			 int reconnect_interval);
 
 /* The first (privdata) argument to each of these functions is either
-   the privdata argument provided to openconnect_vpninfo_new_with_cbdata(),
-   or if that argument was NULL then it'll be the vpninfo itself. */
+			the privdata argument provided to openconnect_vpninfo_new_with_cbdata(),
+			or if that argument was NULL then it'll be the vpninfo itself. */
 
 /* When the server's certificate fails validation via the normal means,
-   this function is called with the offending certificate along with
-   a textual reason for the failure (which may not be translated, if
-   it comes directly from OpenSSL, but will be if it is rejected for
-   "certificate does not match hostname", because that check is done
-   in OpenConnect and *is* translated). The function shall return zero
-   if the certificate is (or has in the past been) explicitly accepted
-   by the user, and non-zero to abort the connection. */
+			this function is called with the offending certificate along with
+			a textual reason for the failure (which may not be translated, if
+			it comes directly from OpenSSL, but will be if it is rejected for
+			"certificate does not match hostname", because that check is done
+			in OpenConnect and *is* translated). The function shall return zero
+			if the certificate is (or has in the past been) explicitly accepted
+			by the user, and non-zero to abort the connection. */
 typedef int (*openconnect_validate_peer_cert_vfn) (void *privdata,
 						   const char *reason);
 /* On a successful connection, the server may provide us with a new XML
-   configuration file. This contains the list of servers that can be
-   chosen by the user to connect to, amongst other stuff that we mostly
-   ignore. By "new", we mean that the SHA1 indicated by the server does
-   not match the SHA1 set with the openconnect_set_xmlsha1() above. If
-   they don't match, or openconnect_set_xmlsha1() has not been called,
-   then the new XML is downloaded and this function is invoked. */
+			configuration file. This contains the list of servers that can be
+			chosen by the user to connect to, amongst other stuff that we mostly
+			ignore. By "new", we mean that the SHA1 indicated by the server does
+			not match the SHA1 set with the openconnect_set_xmlsha1() above. If
+			they don't match, or openconnect_set_xmlsha1() has not been called,
+			then the new XML is downloaded and this function is invoked. */
 typedef int (*openconnect_write_new_config_vfn) (void *privdata, const char *buf,
 						int buflen);
 /* Handle an authentication form, requesting input from the user.
@@ -782,14 +831,14 @@ void openconnect_set_webview_callback(struct openconnect_info *vpninfo,
 				      openconnect_open_webview_vfn);
 
 int openconnect_webview_load_changed(struct openconnect_info *vpninfo,
-                                     const struct oc_webview_result *result);
+																																					const struct oc_webview_result *result);
 
 void openconnect_set_external_browser_callback(struct openconnect_info *vpninfo,
 					       openconnect_open_webview_vfn);
 
 /* Callback to allow binding a newly created socket's file descriptor to
-   a specific interface, e.g. with SO_BINDTODEVICE. This tells the kernel
-   not to route the traffic in question over the VPN tunnel. */
+			a specific interface, e.g. with SO_BINDTODEVICE. This tells the kernel
+			not to route the traffic in question over the VPN tunnel. */
 typedef void (*openconnect_protect_socket_vfn) (void *privdata, int fd);
 void openconnect_set_protect_socket_handler(struct openconnect_info *vpninfo,
 					    openconnect_protect_socket_vfn protect_socket);
@@ -805,11 +854,11 @@ void openconnect_set_stats_handler(struct openconnect_info *vpninfo,
 				   openconnect_stats_vfn stats_handler);
 
 /* SSL certificate capabilities. openconnect_has_pkcs11_support() means that we
-   can accept PKCS#11 URLs in place of filenames, for the certificate and key. */
+			can accept PKCS#11 URLs in place of filenames, for the certificate and key. */
 int openconnect_has_pkcs11_support(void);
 
 /* The OpenSSL TPM ENGINE stores keys in a PEM file labelled with the string
-   -----BEGIN TSS KEY BLOB-----. */
+			-----BEGIN TSS KEY BLOB-----. */
 int openconnect_has_tss_blob_support(void);
 int openconnect_has_tss2_blob_support(void);
 
@@ -829,6 +878,15 @@ struct addrinfo;
 typedef int (*openconnect_getaddrinfo_vfn) (void *privdata, const char *node, const char *service,
 					    const struct addrinfo *hints, struct addrinfo **res);
 void openconnect_override_getaddrinfo(struct openconnect_info *vpninfo, openconnect_getaddrinfo_vfn gai_fn);
+
+/* Replaces vpnc-script configuration, but does not replace tunnel packet I/O.
+ * Called synchronously in the parent process with a borrowed environment list.
+ * Return zero on success or a negative errno on failure. Never mutate env or
+ * the process environment; value == NULL denotes an unset variable. */
+typedef int (*openconnect_configure_tun_fn)(void *data, const char *reason,
+                                          const struct oc_vpn_option *env);
+void openconnect_set_configure_tun_handler(struct openconnect_info *vpninfo,
+                                          void *data, openconnect_configure_tun_fn handler);
 
 /* Callback for configuring the interface after tunnel is fully up. */
 typedef void (*openconnect_setup_tun_vfn) (void *privdata);

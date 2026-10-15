@@ -2773,3 +2773,56 @@ out_of_memory:
 	return ret;
 }
 
+int gp_nlb_aes256_gcm_encrypt(const unsigned char *key,
+			      const unsigned char *iv,
+			      const unsigned char *in, int inlen,
+			      unsigned char *out, unsigned char *tag)
+{
+	EVP_CIPHER_CTX *ctx;
+	int outlen = 0, tmplen = 0;
+	int ret = -EINVAL;
+
+	if (!key || !iv || !in || inlen <= 0 || !out || !tag)
+		return -EINVAL;
+
+	ctx = EVP_CIPHER_CTX_new();
+	if (!ctx)
+		return -ENOMEM;
+
+	if (EVP_EncryptInit_ex(ctx, EVP_aes_256_gcm(), NULL, key, iv) == 1 &&
+	    EVP_EncryptUpdate(ctx, out, &outlen, in, inlen) == 1 &&
+	    EVP_EncryptFinal_ex(ctx, out + outlen, &tmplen) == 1 &&
+	    outlen + tmplen == inlen &&
+	    EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_GET_TAG, 16, tag) == 1)
+		ret = 0;
+
+	EVP_CIPHER_CTX_free(ctx);
+	return ret;
+}
+
+int gp_nlb_aes256_gcm_decrypt(const unsigned char *key,
+			      const unsigned char *iv,
+			      const unsigned char *in, int inlen,
+			      const unsigned char *tag, unsigned char *out)
+{
+	EVP_CIPHER_CTX *ctx;
+	int outlen = 0, tmplen = 0;
+	int ret = -EINVAL;
+
+	if (!key || !iv || !in || inlen <= 0 || !tag || !out)
+		return -EINVAL;
+
+	ctx = EVP_CIPHER_CTX_new();
+	if (!ctx)
+		return -ENOMEM;
+
+	if (EVP_DecryptInit_ex(ctx, EVP_aes_256_gcm(), NULL, key, iv) == 1 &&
+	    EVP_DecryptUpdate(ctx, out, &outlen, in, inlen) == 1 &&
+	    EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_TAG, 16, (void *)tag) == 1 &&
+	    EVP_DecryptFinal_ex(ctx, out + outlen, &tmplen) == 1 &&
+	    outlen + tmplen == inlen)
+		ret = 0;
+
+	EVP_CIPHER_CTX_free(ctx);
+	return ret;
+}

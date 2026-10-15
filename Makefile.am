@@ -45,7 +45,7 @@ library_srcs = ssl.c http.c textbuf.c http-auth.c auth-common.c \
 lib_srcs_cisco = auth.c cstp.c hpke.c multicert.c
 lib_srcs_juniper = oncp.c lzo.c auth-juniper.c
 lib_srcs_pulse = pulse.c
-lib_srcs_globalprotect = gpst.c win32-ipicmp.h auth-globalprotect.c
+lib_srcs_globalprotect = gpst.c gpst_nlb.c win32-ipicmp.h auth-globalprotect.c
 lib_srcs_array = array.c
 lib_srcs_oath = oath.c
 lib_srcs_oidc = oidc.c
@@ -151,7 +151,7 @@ else
 LT_VER_ARG = -version-number
 endif
 libopenconnect_la_LDFLAGS = $(LT_VER_ARG) @APIMAJOR@:@APIMINOR@ -no-undefined
-noinst_HEADERS = openconnect-internal.h openconnect.h gnutls.h lzo.h
+noinst_HEADERS = openconnect-internal.h openconnect.h gnutls.h lzo.h gpst_nlb.h
 include_HEADERS = openconnect.h
 if HAVE_VSCRIPT
 libopenconnect_la_LDFLAGS += @VSCRIPT_LDFLAGS@,libopenconnect.map

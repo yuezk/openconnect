@@ -2359,7 +2359,8 @@ int openconnect_open_https(struct openconnect_info *vpninfo)
 			}
 		}
 	}
-	gnutls_init(&vpninfo->https_sess, GNUTLS_CLIENT|GNUTLS_FORCE_CLIENT_CERT);
+	gnutls_init(&vpninfo->https_sess,
+		    GNUTLS_CLIENT|GNUTLS_NONBLOCK|GNUTLS_FORCE_CLIENT_CERT);
 	gnutls_session_set_ptr(vpninfo->https_sess, (void *) vpninfo);
 	/*
 	 * For versions of GnuTLS older than 3.2.9, we try to avoid long
@@ -3602,4 +3603,66 @@ error:
 
 done:
 	return ret;
+}
+
+int gp_nlb_aes256_gcm_encrypt(const unsigned char *key,
+			      const unsigned char *iv,
+			      const unsigned char *in, int inlen,
+			      unsigned char *out, unsigned char *tag)
+{
+	gnutls_cipher_hd_t hd = NULL;
+	gnutls_datum_t key_d, iv_d;
+	int err;
+
+	if (!key || !iv || !in || inlen <= 0 || !out || !tag)
+		return -EINVAL;
+
+	key_d.data = (unsigned char *)key;
+	key_d.size = 32;
+	iv_d.data = (unsigned char *)iv;
+	iv_d.size = 12;
+	err = gnutls_cipher_init(&hd, GNUTLS_CIPHER_AES_256_GCM, &key_d, &iv_d);
+	if (err)
+		return -EINVAL;
+
+	memcpy(out, in, inlen);
+	err = gnutls_cipher_encrypt(hd, out, inlen);
+	if (!err)
+		err = gnutls_cipher_tag(hd, tag, 16);
+	gnutls_cipher_deinit(hd);
+	return err ? -EINVAL : 0;
+}
+
+int gp_nlb_aes256_gcm_decrypt(const unsigned char *key,
+			      const unsigned char *iv,
+			      const unsigned char *in, int inlen,
+			      const unsigned char *tag, unsigned char *out)
+{
+	gnutls_cipher_hd_t hd = NULL;
+	gnutls_datum_t key_d, iv_d;
+	unsigned char calculated_tag[16];
+	int err;
+
+	if (!key || !iv || !in || inlen <= 0 || !tag || !out)
+		return -EINVAL;
+
+	key_d.data = (unsigned char *)key;
+	key_d.size = 32;
+	iv_d.data = (unsigned char *)iv;
+	iv_d.size = 12;
+	err = gnutls_cipher_init(&hd, GNUTLS_CIPHER_AES_256_GCM, &key_d, &iv_d);
+	if (err)
+		return -EINVAL;
+
+	memcpy(out, in, inlen);
+	err = gnutls_cipher_decrypt(hd, out, inlen);
+	if (!err)
+		err = gnutls_cipher_tag(hd, calculated_tag, sizeof(calculated_tag));
+	gnutls_cipher_deinit(hd);
+	if (err || memcmp(calculated_tag, tag, sizeof(calculated_tag))) {
+		memset(calculated_tag, 0, sizeof(calculated_tag));
+		return -EINVAL;
+	}
+	memset(calculated_tag, 0, sizeof(calculated_tag));
+	return 0;
 }

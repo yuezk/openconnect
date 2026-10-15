@@ -1,0 +1,87 @@
+#!/bin/sh
+# Validate GlobalProtect ESP-GCM packet layout helpers (nonce + AAD)
+set -eu
+cd "$(dirname "$0")/.."
+CC="${CC:-cc}"
+TMP=$(mktemp -d)
+trap 'rm -rf "$TMP"' EXIT
+
+cat > "$TMP/test.c" <<'EOF'
+#include <stdio.h>
+#include <stdint.h>
+#include <string.h>
+#include <arpa/inet.h>
+
+#define ESP_GCM_IV_LEN 8
+#define ESP_GCM_SALT_LEN 4
+
+static inline uint32_t load_be32(const void *p)
+{
+	uint32_t n;
+	memcpy(&n, p, 4);
+	return ntohl(n);
+}
+
+static void esp_gcm_nonce(unsigned char *nonce, const unsigned char *enc_key, int keylen,
+		      const unsigned char *iv)
+{
+	memcpy(nonce, enc_key + keylen, ESP_GCM_SALT_LEN);
+	memcpy(nonce + ESP_GCM_SALT_LEN, iv, ESP_GCM_IV_LEN);
+}
+
+static void esp_gcm_aad(unsigned char *aad, uint32_t spi, uint32_t seq)
+{
+	uint32_t be[2];
+	be[0] = spi;
+	be[1] = seq;
+	memcpy(aad, be, 8);
+}
+
+int main(void)
+{
+	unsigned char key[36] = {0};
+	unsigned char iv[8] = { 1, 2, 3, 4, 5, 6, 7, 8 };
+	unsigned char nonce[12], aad[8];
+	key[32] = 0xaa; key[33]=0xbb; key[34]=0xcc; key[35]=0xdd;
+	unsigned char expect_nonce[12] = { 0xaa,0xbb,0xcc,0xdd, 1,2,3,4,5,6,7,8 };
+	int keylen = 32;
+	uint32_t seq = htonl(42);
+	uint32_t spi = htonl(0x12345678);
+
+	esp_gcm_nonce(nonce, key, keylen, iv);
+	if (memcmp(nonce, expect_nonce, sizeof(nonce))) {
+		fprintf(stderr, "nonce construction failed\n");
+		return 1;
+	}
+
+	esp_gcm_aad(aad, spi, seq);
+	if (load_be32(aad) != ntohl(spi) || load_be32(aad + 4) != ntohl(seq)) {
+		fprintf(stderr, "aad construction failed\n");
+		return 1;
+	}
+
+	/* GCM wire header is 16 bytes but pkt->data follows a 24-byte ESP prefix */
+	{
+		struct { uint32_t spi, seq; unsigned char iv[16]; unsigned char data[32]; } pkt;
+		unsigned char expect[33];
+		int crypt_len = 17, icv_len = 16, hdr = 16;
+		unsigned char *wire = (unsigned char *)&pkt.spi;
+
+		memset(&pkt, 0xcc, sizeof(pkt));
+		memset(pkt.data, 0xdd, crypt_len);
+		memset(pkt.data + crypt_len, 0xee, icv_len);
+		memcpy(expect, pkt.data, sizeof(expect));
+		memmove(wire + hdr, pkt.data, crypt_len + icv_len);
+		if (memcmp(wire + hdr, expect, crypt_len + icv_len) ||
+		    wire[8] != 0xcc || wire[15] != 0xcc) {
+			fprintf(stderr, "wire pack layout failed\n");
+			return 1;
+		}
+	}
+
+	printf("gp-esp-gcm-roundtrip: OK\n");
+	return 0;
+}
+EOF
+$CC -o "$TMP/test" "$TMP/test.c"
+"$TMP/test"

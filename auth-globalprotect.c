@@ -34,14 +34,7 @@ struct login_context {
 void gpst_common_headers(struct openconnect_info *vpninfo,
 			 struct oc_text_buf *buf)
 {
-	char *orig_ua = vpninfo->useragent;
-
-	/* XX: more recent servers don't appear to require this specific UA value,
-	 * but we don't have any good way to detect them.
-	 */
-	vpninfo->useragent = (char *)"PAN GlobalProtect";
 	http_common_headers(vpninfo, buf);
-	vpninfo->useragent = orig_ua;
 }
 
 /* Translate platform names (derived from AnyConnect) into the values
@@ -738,7 +731,7 @@ static int gpst_login(struct openconnect_info *vpninfo, int portal, struct login
 		buf_append(request_body, "jnlpReady=jnlpReady&ok=Login&direct=yes&clientVer=4100&prot=https:&internal=no");
 		append_opt(request_body, "ipv6-support", vpninfo->disable_ipv6 ? "no" : "yes");
 		append_opt(request_body, "clientos", gpst_os_name(vpninfo));
-		append_opt(request_body, "os-version", vpninfo->platname);
+		append_opt(request_body, "os-version", openconnect_get_gp_os_version(vpninfo));
 		append_opt(request_body, "server", vpninfo->hostname);
 		append_opt(request_body, "computer", vpninfo->localname);
 		if (ctx->portal_userauthcookie)

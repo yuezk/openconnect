@@ -391,6 +391,26 @@ struct oc_tpm2_ctx;
 
 struct openconnect_info;
 
+struct gp_nlb_config {
+	int enabled;
+	unsigned char hs_key[32];
+	int hs_key_len;
+	char *enc_hs_key;
+	char *tunnel_opaque;
+	time_t opaque_valid_until;
+	char *inner_gw_ip;
+	char *inner_gw_ip6;
+	char *tunnel_vip;
+	char *tunnel_vip6;
+	char *connected_gw_ip;
+	char *in_tunnel_gw_cert_chksum;
+	int control_state;
+	time_t last_nlb_send;
+	unsigned int control_requests;
+	int keepalive_sent;
+	unsigned int keepalive_seq;
+};
+
 struct cert_info {
 	struct openconnect_info *vpninfo;
 	char *cert;
@@ -438,6 +458,7 @@ struct openconnect_info {
 	int enc_key_len;
 	int hmac_key_len;
 	int hmac_out_len;
+	int esp_gcm_icv;
 
 	int esp_magic_af;
 	unsigned char esp_magic[16]; /* GlobalProtect magic ping address (network-endian) */
@@ -580,6 +601,8 @@ struct openconnect_info {
 	struct oc_vpn_option *dtls_options;
 
 	struct oc_vpn_option *script_env;
+	openconnect_configure_tun_fn configure_tun;
+	void *configure_tun_data;
 	struct oc_vpn_option *csd_env;
 
 	unsigned pfs;
@@ -647,6 +670,11 @@ struct openconnect_info {
 	int dtls_attempt_period;
 	int udp_probes_sent;
 	time_t auth_expiration;
+	int gp_session_lifetime;
+	time_t gp_user_expires;
+	int gp_lifetime_notify_prior;
+	char *gp_lifetime_notify_message;
+	struct gp_nlb_config gp_nlb;
 	time_t new_dtls_started;
 #if defined(OPENCONNECT_OPENSSL)
 	SSL_CTX *dtls_ctx;
@@ -786,6 +814,9 @@ struct openconnect_info {
 	int is_dyndns; /* Attempt to redo DNS lookup on each CSTP reconnect */
 	char *useragent;
 	char *version_string;
+	char *gp_app_version;
+	char *gp_os_version;
+	char *gp_host_id;
 
 	const char *quit_reason;
 	const char *delay_tunnel_reason;        /* If non-null, provides a reason why protocol is not yet ready for tunnel setup */
@@ -815,6 +846,14 @@ struct openconnect_info {
 	openconnect_getaddrinfo_vfn getaddrinfo_override;
 	openconnect_setup_tun_vfn setup_tun;
 	openconnect_reconnected_vfn reconnected;
+	openconnect_gp_hip_report_vfn gp_hip_report;
+	void *gp_hip_report_data;
+	openconnect_gp_hip_generate_fn gp_hip_generate;
+	void *gp_hip_generate_data;
+	openconnect_gp_hip_validate_fn gp_hip_validate;
+	void *gp_hip_validate_data;
+	char **gp_hip_environment;
+	char *gp_hip_cwd;
 
 	int (*ssl_read)(struct openconnect_info *vpninfo, char *buf, size_t len);
 	int (*ssl_gets)(struct openconnect_info *vpninfo, char *buf, size_t len);
@@ -1078,10 +1117,17 @@ static inline void __monitor_fd_new(struct openconnect_info *vpninfo,
 /* Encryption and HMAC algorithms (matching Juniper/Pulse binary encoding) */
 #define ENC_AES_128_CBC		2
 #define ENC_AES_256_CBC		5
+#define ENC_AES_128_GCM		20
+#define ENC_AES_256_GCM		22
 
+#define HMAC_NONE		0
 #define HMAC_MD5		1
 #define HMAC_SHA1		2
 #define HMAC_SHA256		3
+
+#define ESP_GCM_IV_LEN		8
+#define ESP_GCM_SALT_LEN	4
+#define ESP_GCM_ICV_DEFAULT	16
 
 #define MAX_HMAC_SIZE		32	/* SHA256 */
 #define MAX_IV_SIZE		16
@@ -1398,6 +1444,24 @@ int gpst_xml_or_error(struct openconnect_info *vpninfo, char *response,
 					  int (*challenge_cb)(struct openconnect_info *, char *prompt, char *inputStr, void *cb_data),
 					  void *cb_data);
 int gpst_setup(struct openconnect_info *vpninfo);
+int gpst_nlb_prepare(struct openconnect_info *vpninfo);
+const unsigned char *gpst_nlb_probe_payload(size_t *len);
+int gpst_nlb_send_esp_keepalive(struct openconnect_info *vpninfo);
+int gpst_nlb_control_ready(struct openconnect_info *vpninfo);
+int gpst_nlb_send_tunnel_request(struct openconnect_info *vpninfo);
+int gpst_nlb_handle_tunnel_response(struct openconnect_info *vpninfo,
+				    const unsigned char *buf, int len);
+#ifdef HAVE_ESP
+int gpst_nlb_restore(struct openconnect_info *vpninfo);
+void gpst_nlb_udp_closed(struct openconnect_info *vpninfo);
+void gpst_nlb_restore_complete(struct openconnect_info *vpninfo);
+#endif
+void gpst_nlb_report_timeout(struct openconnect_info *vpninfo);
+int gpst_nlb_parse_ssl_response(const char *buf, int len, struct gp_nlb_config *nlb);
+int gpst_nlb_apply_routes(struct openconnect_info *vpninfo);
+int gpst_nlb_apply_tunnel_config(struct openconnect_info *vpninfo);
+int gpst_nlb_handle_ssl_connect_response(struct openconnect_info *vpninfo,
+					 const char *buf, int len);
 int gpst_mainloop(struct openconnect_info *vpninfo, int *timeout, int readable);
 int gpst_esp_send_probes(struct openconnect_info *vpninfo);
 int gpst_esp_catch_probe(struct openconnect_info *vpninfo, struct pkt *pkt);
@@ -1469,8 +1533,67 @@ void destroy_esp_ciphers(struct esp *esp);
 int init_esp_ciphers(struct openconnect_info *vpninfo, struct esp *out, struct esp *in);
 int decrypt_esp_packet(struct openconnect_info *vpninfo, struct esp *esp, struct pkt *pkt);
 int encrypt_esp_packet(struct openconnect_info *vpninfo, struct pkt *pkt, int crypt_len);
+int esp_gcm_auth_outgoing(struct openconnect_info *vpninfo, struct pkt *pkt, int crypt_len);
+
+static inline int esp_uses_gcm(const struct openconnect_info *vpninfo)
+{
+	return vpninfo->esp_enc == ENC_AES_128_GCM ||
+	       vpninfo->esp_enc == ENC_AES_256_GCM;
+}
+
+static inline int esp_wire_iv_len(const struct openconnect_info *vpninfo)
+{
+	return esp_uses_gcm(vpninfo) ? ESP_GCM_IV_LEN : MAX_IV_SIZE;
+}
+
+static inline int esp_wire_hdr_len(const struct openconnect_info *vpninfo)
+{
+	return 8 + esp_wire_iv_len(vpninfo); /* SPI + seq + IV */
+}
+
+static inline int esp_gcm_auth_len(const struct openconnect_info *vpninfo)
+{
+	return 0;
+}
+
+static inline int esp_trailer_len(const struct openconnect_info *vpninfo)
+{
+	if (esp_uses_gcm(vpninfo))
+		return vpninfo->esp_gcm_icv + esp_gcm_auth_len(vpninfo);
+	return vpninfo->hmac_out_len;
+}
+
+static inline int esp_gcm_cipher_key_len(const struct openconnect_info *vpninfo)
+{
+	return vpninfo->esp_enc == ENC_AES_256_GCM ? 32 : 16;
+}
+
+static inline int esp_gpst_gcm_omits_next_hdr(const struct openconnect_info *vpninfo)
+{
+	return 0;
+}
+
+static inline void esp_gcm_nonce(unsigned char *nonce,
+				 const unsigned char *enc_key,
+				 const struct openconnect_info *vpninfo,
+				 const unsigned char *iv,
+				 uint32_t seq)
+{
+	(void)seq;
+	/* RFC4106 nonce = 4-byte salt from the ESP key tail || 8-byte packet IV. */
+	memcpy(nonce, enc_key + esp_gcm_cipher_key_len(vpninfo), ESP_GCM_SALT_LEN);
+	memcpy(nonce + ESP_GCM_SALT_LEN, iv, ESP_GCM_IV_LEN);
+}
 
 /* {gnutls,openssl}.c */
+int gp_nlb_aes256_gcm_encrypt(const unsigned char *key,
+			      const unsigned char *iv,
+			      const unsigned char *in, int inlen,
+			      unsigned char *out, unsigned char *tag);
+int gp_nlb_aes256_gcm_decrypt(const unsigned char *key,
+			      const unsigned char *iv,
+			      const unsigned char *in, int inlen,
+			      const unsigned char *tag, unsigned char *out);
 const char *openconnect_get_tls_library_version(void);
 int can_enable_insecure_crypto(void);
 int ssl_nonblock_read(struct openconnect_info *vpninfo, int dtls, void *buf, int maxlen);
@@ -1676,6 +1799,15 @@ void openconnect_set_juniper(struct openconnect_info *vpninfo);
 
 /* hpke.c */
 int handle_external_browser(struct openconnect_info *vpninfo);
+
+/* Get the app version */
+const char *openconnect_get_gp_app_version(struct openconnect_info *vpninfo);
+
+/* Get the OS version string for GP */
+const char *openconnect_get_gp_os_version(struct openconnect_info *vpninfo);
+
+/* Get the host ID string for GP */
+const char *openconnect_get_gp_host_id(struct openconnect_info *vpninfo);
 
 /* version.c */
 extern const char openconnect_version_str[];

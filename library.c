@@ -19,6 +19,9 @@
 #include <config.h>
 
 #include "openconnect-internal.h"
+#if !defined(_WIN32) && !defined(__native_client__)
+#include <pwd.h>
+#endif
 
 #if defined(OPENCONNECT_GNUTLS)
 #include "gnutls.h"
@@ -196,6 +199,7 @@ struct openconnect_info *openconnect_vpninfo_new(const char *useragent,
 	vpninfo->dtls_fd = -1;
 	vpninfo->need_poll_cmd_fd = -1;
 	vpninfo->cmd_fd = -1;
+	vpninfo->cmd_fd_write = -1;
 	init_pkt_queue(&vpninfo->free_queue);
 	init_pkt_queue(&vpninfo->incoming_queue);
 	init_pkt_queue(&vpninfo->outgoing_queue);
@@ -636,7 +640,6 @@ const char *add_option_ipaddr(struct oc_vpn_option **list,
 	return add_option_dup(list, opt, buf, -1);
 }
 
-
 void free_optlist(struct oc_vpn_option *opt)
 {
 	struct oc_vpn_option *next;
@@ -711,7 +714,7 @@ int install_vpn_opts(struct openconnect_info *vpninfo, struct oc_vpn_option *opt
 		}
 	}
 
- after_ip_checks:
+	after_ip_checks:
 	/* Preserve gateway_addr and MTU if they were set */
 	ip_info->gateway_addr = vpninfo->ip_info.gateway_addr;
 	if (!ip_info->mtu)
@@ -768,10 +771,13 @@ static void free_certinfo(struct cert_info *certinfo)
 	free_pass(&certinfo->password);
 }
 
+static void free_hip_environment(struct openconnect_info *vpninfo);
+
 void openconnect_vpninfo_free(struct openconnect_info *vpninfo)
 {
+	free_hip_environment(vpninfo);
 	openconnect_close_https(vpninfo, 1);
-	if (vpninfo->proto->udp_shutdown)
+	if (vpninfo->proto && vpninfo->proto->udp_shutdown)
 		vpninfo->proto->udp_shutdown(vpninfo);
 	if (vpninfo->tncc_fd >= 0)
 		closesocket(vpninfo->tncc_fd);
@@ -838,6 +844,16 @@ void openconnect_vpninfo_free(struct openconnect_info *vpninfo)
 	free(vpninfo->dtls_cipher);
 	free(vpninfo->peer_cert_hash);
 	free(vpninfo->ciphersuite_config);
+	free(vpninfo->gp_lifetime_notify_message);
+	free(vpninfo->gp_nlb.enc_hs_key);
+	free(vpninfo->gp_nlb.tunnel_opaque);
+	free(vpninfo->gp_nlb.inner_gw_ip);
+	free(vpninfo->gp_nlb.inner_gw_ip6);
+	free(vpninfo->gp_nlb.tunnel_vip);
+	free(vpninfo->gp_nlb.tunnel_vip6);
+	free(vpninfo->gp_nlb.connected_gw_ip);
+	free(vpninfo->gp_nlb.in_tunnel_gw_cert_chksum);
+	memset(vpninfo->gp_nlb.hs_key, 0, sizeof(vpninfo->gp_nlb.hs_key));
 #if defined(OPENCONNECT_OPENSSL)
 	free(vpninfo->cstp_cipher);
 #if defined(HAVE_BIO_METH_FREE)
@@ -896,6 +912,9 @@ void openconnect_vpninfo_free(struct openconnect_info *vpninfo)
 
 	free(vpninfo->localname);
 	free(vpninfo->useragent);
+	free(vpninfo->gp_app_version);
+	free(vpninfo->gp_os_version);
+	free(vpninfo->gp_host_id);
 	free(vpninfo->authgroup);
 #ifdef HAVE_LIBSTOKEN
 	if (vpninfo->stoken_pin)
@@ -945,7 +964,6 @@ void openconnect_vpninfo_free(struct openconnect_info *vpninfo)
 	free(vpninfo->bearer_token);
 	free(vpninfo);
 }
-
 
 const char *openconnect_get_connect_url(struct openconnect_info *vpninfo)
 {
@@ -1017,6 +1035,164 @@ int openconnect_set_useragent(struct openconnect_info *vpninfo,
 
 	STRDUP(vpninfo->useragent, useragent);
 	return 0;
+}
+
+int openconnect_set_gp_app_version(struct openconnect_info *vpninfo,
+				   const char *gp_app_version)
+{
+	UTF8CHECK(gp_app_version);
+
+	STRDUP(vpninfo->gp_app_version, gp_app_version);
+	return 0;
+}
+
+const char *openconnect_get_gp_app_version(struct openconnect_info *vpninfo)
+{
+	return vpninfo->csd_ticket ?: (vpninfo->gp_app_version ?: "6.3.0-33");
+}
+
+int openconnect_set_gp_os_version(struct openconnect_info *vpninfo,
+				  const char *gp_os_version)
+{
+	UTF8CHECK(gp_os_version);
+
+	STRDUP(vpninfo->gp_os_version, gp_os_version);
+	return 0;
+}
+
+const char *openconnect_get_gp_os_version(struct openconnect_info *vpninfo)
+{
+	return vpninfo->gp_os_version ?: vpninfo->platname;
+}
+
+int openconnect_set_gp_host_id(struct openconnect_info *vpninfo,
+			       const char *gp_host_id)
+{
+	UTF8CHECK(gp_host_id);
+
+	STRDUP(vpninfo->gp_host_id, gp_host_id);
+	return 0;
+}
+
+void openconnect_set_gp_hip_generator(struct openconnect_info *vpninfo, void *data,
+	openconnect_gp_hip_generate_fn callback)
+{
+	vpninfo->gp_hip_generate_data = data;
+	vpninfo->gp_hip_generate = callback;
+}
+
+static void free_hip_environment(struct openconnect_info *vpninfo)
+{
+	char **entry = vpninfo->gp_hip_environment;
+	if (entry) {
+		while (*entry)
+			free(*entry++);
+		free(vpninfo->gp_hip_environment);
+		vpninfo->gp_hip_environment = NULL;
+	}
+	free(vpninfo->gp_hip_cwd);
+	vpninfo->gp_hip_cwd = NULL;
+}
+
+int openconnect_set_gp_hip_script(struct openconnect_info *vpninfo, const char *path,
+	int uid_present, uid_t uid, void *data, openconnect_gp_hip_validate_fn validate,
+	const char *const *environment, const char *cwd)
+{
+#if defined(_WIN32) || defined(__native_client__)
+	if (path) {
+		vpn_progress(vpninfo, PRG_ERR,
+			     _("HIP script execution is not supported on this platform.\n"));
+		return -EOPNOTSUPP;
+	}
+	free(vpninfo->csd_wrapper);
+	vpninfo->csd_wrapper = NULL;
+	free_hip_environment(vpninfo);
+	vpninfo->gp_hip_validate = NULL;
+	vpninfo->gp_hip_validate_data = NULL;
+	return 0;
+#else
+	char *new_path = NULL, *new_cwd = NULL;
+	char **new_environment = NULL;
+	size_t count = 0, i;
+	gid_t gid = 0;
+	int ret = -ENOMEM;
+
+	if (uid_present) {
+		struct passwd pwd, *result;
+		char buffer[16384];
+		int error = getpwuid_r(uid, &pwd, buffer, sizeof(buffer), &result);
+		if (error || !result) {
+			ret = error ? -error : -ENOENT;
+			if (error)
+				vpn_progress(vpninfo, PRG_ERR,
+					     _("Failed to look up HIP script user %lu: %s\n"),
+					     (unsigned long)uid, strerror(error));
+			else
+				vpn_progress(vpninfo, PRG_ERR,
+					     _("HIP script user %lu does not exist.\n"), (unsigned long)uid);
+			return ret;
+		}
+		gid = pwd.pw_gid;
+	}
+	if (path) {
+		new_path = strdup(path);
+		if (!new_path)
+			goto fail;
+	}
+	if (environment) {
+		while (environment[count])
+			count++;
+		new_environment = calloc(count + 1, sizeof(char *));
+		if (!new_environment)
+			goto fail;
+		for (i = 0; i < count; i++) {
+			new_environment[i] = strdup(environment[i]);
+			if (!new_environment[i])
+				goto fail;
+		}
+	}
+	if (cwd) {
+		new_cwd = strdup(cwd);
+		if (!new_cwd)
+			goto fail;
+	}
+
+	/* Replace the complete policy only after all fallible work succeeds. */
+	free(vpninfo->csd_wrapper);
+	free_hip_environment(vpninfo);
+	vpninfo->csd_wrapper = new_path;
+	vpninfo->uid_csd_given = uid_present;
+	vpninfo->uid_csd = uid;
+	vpninfo->gid_csd = gid;
+	vpninfo->gp_hip_validate = validate;
+	vpninfo->gp_hip_validate_data = data;
+	vpninfo->gp_hip_environment = new_environment;
+	vpninfo->gp_hip_cwd = new_cwd;
+	return 0;
+
+fail:
+	if (new_environment) {
+		for (i = 0; new_environment[i]; i++)
+			free(new_environment[i]);
+		free(new_environment);
+	}
+	free(new_path);
+	free(new_cwd);
+	vpn_progress(vpninfo, PRG_ERR, _("Failed to allocate HIP script configuration.\n"));
+	return ret;
+#endif
+}
+
+void openconnect_set_gp_hip_report_callback(struct openconnect_info *vpninfo,
+					    void *data, openconnect_gp_hip_report_vfn callback)
+{
+	vpninfo->gp_hip_report_data = data;
+	vpninfo->gp_hip_report = callback;
+}
+
+const char *openconnect_get_gp_host_id(struct openconnect_info *vpninfo)
+{
+	return vpninfo->gp_host_id;
 }
 
 int openconnect_set_urlpath(struct openconnect_info *vpninfo,
@@ -1137,6 +1313,36 @@ time_t openconnect_get_auth_expiration(struct openconnect_info *vpninfo)
 	return vpninfo->auth_expiration;
 }
 
+int openconnect_get_gp_session_lifetime(struct openconnect_info *vpninfo)
+{
+	return vpninfo->gp_session_lifetime;
+}
+
+time_t openconnect_get_gp_user_expires(struct openconnect_info *vpninfo)
+{
+	return vpninfo->gp_user_expires;
+}
+
+int openconnect_get_gp_lifetime_notify_prior(struct openconnect_info *vpninfo)
+{
+	return vpninfo->gp_lifetime_notify_prior;
+}
+
+const char *openconnect_get_gp_lifetime_notify_message(struct openconnect_info *vpninfo)
+{
+	return vpninfo->gp_lifetime_notify_message;
+}
+
+int openconnect_get_gp_nlb_enabled(struct openconnect_info *vpninfo)
+{
+	return vpninfo->gp_nlb.enabled;
+}
+
+const char *openconnect_get_gp_nlb_connected_gw_ip(struct openconnect_info *vpninfo)
+{
+	return vpninfo->gp_nlb.connected_gw_ip;
+}
+
 int openconnect_get_ip_info(struct openconnect_info *vpninfo,
 			    const struct oc_ip_info **info,
 			    const struct oc_vpn_option **cstp_options,
@@ -1154,13 +1360,27 @@ int openconnect_get_ip_info(struct openconnect_info *vpninfo,
 int openconnect_setup_csd(struct openconnect_info *vpninfo, uid_t uid,
 			  int silent, const char *wrapper)
 {
+#if !defined(_WIN32) && !defined(__native_client__)
+	/* The legacy API replaces the complete policy and resolves the new group. */
+	return openconnect_set_gp_hip_script(vpninfo, wrapper, silent ? 2 : 1,
+					     uid, NULL, NULL, NULL, NULL);
+#else
+	char *new_wrapper = wrapper ? strdup(wrapper) : NULL;
+	if (wrapper && !new_wrapper)
+		return -ENOMEM;
+
+	/* Legacy CSD registration replaces any HIP-specific script policy. */
+	free(vpninfo->csd_wrapper);
+	free_hip_environment(vpninfo);
+	vpninfo->gp_hip_validate = NULL;
+	vpninfo->gp_hip_validate_data = NULL;
+	vpninfo->csd_wrapper = new_wrapper;
 #ifndef _WIN32
 	vpninfo->uid_csd = uid;
 	vpninfo->uid_csd_given = silent ? 2 : 1;
 #endif
-	STRDUP(vpninfo->csd_wrapper, wrapper);
-
 	return 0;
+#endif
 }
 
 void openconnect_set_xmlpost(struct openconnect_info *vpninfo, int enable)
@@ -1530,6 +1750,13 @@ void openconnect_override_getaddrinfo(struct openconnect_info *vpninfo, openconn
 	vpninfo->getaddrinfo_override = gai_fn;
 }
 
+void openconnect_set_configure_tun_handler(struct openconnect_info *vpninfo,
+                                          void *data, openconnect_configure_tun_fn handler)
+{
+	vpninfo->configure_tun = handler;
+	vpninfo->configure_tun_data = data;
+}
+
 void openconnect_set_setup_tun_handler(struct openconnect_info *vpninfo,
 				       openconnect_setup_tun_vfn setup_tun)
 {
@@ -1553,6 +1780,7 @@ int openconnect_setup_tun_device(struct openconnect_info *vpninfo,
 				 const char *vpnc_script, const char *ifname)
 {
 	intptr_t tun_fd;
+	int ret;
 	char *legacy_ifname;
 
 	UTF8CHECK(vpnc_script);
@@ -1570,7 +1798,9 @@ int openconnect_setup_tun_device(struct openconnect_info *vpninfo,
 	if (legacy_ifname != vpninfo->ifname)
 		free(legacy_ifname);
 
-	script_config_tun(vpninfo, "pre-init");
+	ret = script_config_tun(vpninfo, "pre-init");
+	if (ret && vpninfo->configure_tun)
+		return ret;
 
 	tun_fd = os_setup_tun(vpninfo);
 	if (tun_fd < 0)
@@ -1587,8 +1817,18 @@ int openconnect_setup_tun_device(struct openconnect_info *vpninfo,
 	if (legacy_ifname != vpninfo->ifname)
 		free(legacy_ifname);
 
-	script_config_tun(vpninfo, "connect");
+	/* Attach first for callback configuration so a failed connect can roll back
+	 * through the normal disconnect path and close the owned device. */
+	if (vpninfo->configure_tun) {
+		ret = openconnect_setup_tun_fd(vpninfo, tun_fd);
+		if (!ret)
+			ret = script_config_tun(vpninfo, "connect");
+		if (ret)
+			os_shutdown_tun(vpninfo);
+		return ret;
+	}
 
+	script_config_tun(vpninfo, "connect");
 	return openconnect_setup_tun_fd(vpninfo, tun_fd);
 }
 
