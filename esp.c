@@ -565,6 +565,8 @@ int esp_mainloop(struct openconnect_info *vpninfo, int *timeout, int readable)
 
 void esp_close(struct openconnect_info *vpninfo)
 {
+	if (vpninfo->dtls_state >= DTLS_CONNECTED)
+		report_tunnel_event(vpninfo, OC_TUNNEL_UNAVAILABLE);
 	/* We close and reopen the socket in case we roamed and our
 	   local IP address has changed. */
 	if (vpninfo->dtls_fd >= 0) {

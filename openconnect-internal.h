@@ -800,6 +800,7 @@ struct openconnect_info {
 	int max_qlen;
 	struct oc_stats stats;
 	openconnect_stats_vfn stats_handler;
+	openconnect_tunnel_vfn tunnel_handler;
 
 	socklen_t peer_addrlen;
 	struct sockaddr *peer_addr;
@@ -1501,6 +1502,12 @@ ssize_t openconnect_read_file(struct openconnect_info *vpninfo, const char *fnam
 int udp_sockaddr(struct openconnect_info *vpninfo, int port);
 int udp_connect(struct openconnect_info *vpninfo);
 int ssl_reconnect(struct openconnect_info *vpninfo);
+static inline void report_tunnel_event(struct openconnect_info *vpninfo,
+				      enum openconnect_tunnel_event event)
+{
+	if (vpninfo->tunnel_handler && vpninfo->proto->proto == PROTO_GPST)
+		vpninfo->tunnel_handler(vpninfo->cbdata, event);
+}
 void openconnect_clear_cookies(struct openconnect_info *vpninfo);
 int cancellable_gets(struct openconnect_info *vpninfo, int fd,
 		     char *buf, size_t len);

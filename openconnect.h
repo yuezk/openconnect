@@ -898,6 +898,20 @@ typedef void (*openconnect_reconnected_vfn) (void *privdata);
 void openconnect_set_reconnected_handler(struct openconnect_info *vpninfo,
 				         openconnect_reconnected_vfn reconnected_fn);
 
+/* Typed observation of the GlobalProtect data path. Callbacks run synchronously
+ * on the connection thread and must not block or alter connection state. */
+enum openconnect_tunnel_event {
+	OC_TUNNEL_NEGOTIATING,
+	OC_TUNNEL_IPSEC_ESP,
+	OC_TUNNEL_SSL_TLS,
+	OC_TUNNEL_UNAVAILABLE,
+	OC_TUNNEL_RECONNECTING
+};
+typedef void (*openconnect_tunnel_vfn)(void *privdata,
+				      enum openconnect_tunnel_event event);
+void openconnect_set_tunnel_handler(struct openconnect_info *vpninfo,
+				   openconnect_tunnel_vfn handler);
+
 #ifdef __cplusplus
 }
 #endif

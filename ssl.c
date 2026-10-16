@@ -1198,6 +1198,8 @@ int ssl_reconnect(struct openconnect_info *vpninfo)
 	int interval;
 	int tun_up = tun_is_up(vpninfo);
 
+	if (tun_up)
+		report_tunnel_event(vpninfo, OC_TUNNEL_RECONNECTING);
 	openconnect_close_https(vpninfo, 0);
 
 

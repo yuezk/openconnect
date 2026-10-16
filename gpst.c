@@ -1062,6 +1062,7 @@ static int gpst_connect(struct openconnect_info *vpninfo)
 		   hence shutdown */
 		if (vpninfo->proto->udp_shutdown)
 			vpninfo->proto->udp_shutdown(vpninfo);
+		report_tunnel_event(vpninfo, OC_TUNNEL_SSL_TLS);
 	}
 
 out:
@@ -1763,6 +1764,7 @@ int gpst_mainloop(struct openconnect_info *vpninfo, int *timeout, int readable)
 		vpn_progress(vpninfo, PRG_INFO,
 			     _("ESP tunnel connected; exiting HTTPS mainloop.\n"));
 		vpninfo->dtls_state = DTLS_ESTABLISHED;
+		report_tunnel_event(vpninfo, OC_TUNNEL_IPSEC_ESP);
 		/* Now that we are connected, let's ensure timeout is less than
 		 * or equal to DTLS DPD/keepalive else we might over sleep, eg
 		 * if timeout is set to DTLS attempt period from ESP mainloop,
@@ -1941,6 +1943,8 @@ int gpst_mainloop(struct openconnect_info *vpninfo, int *timeout, int readable)
 		 * redo the HIP check/submission, and reconnect the HTTPS tunnel
 		 * if needed.
 		 */
+		if (vpninfo->dtls_state < DTLS_CONNECTED)
+			report_tunnel_event(vpninfo, OC_TUNNEL_UNAVAILABLE);
 		openconnect_close_https(vpninfo, 0);
 		ret = check_and_maybe_submit_hip_report(vpninfo);
 		if (ret) {

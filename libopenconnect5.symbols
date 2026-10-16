@@ -100,6 +100,7 @@ libopenconnect.so.5 libopenconnect5 #MINVER#
  openconnect_get_gp_lifetime_notify_message@OPENCONNECT_5_7 8.20
  openconnect_get_gp_nlb_enabled@OPENCONNECT_5_7 8.20
  openconnect_get_gp_nlb_connected_gw_ip@OPENCONNECT_5_7 8.20
+ openconnect_set_tunnel_handler@OPENCONNECT_5_9 8.20
  openconnect_disable_dtls@OPENCONNECT_5_7 8.20
  openconnect_get_connect_url@OPENCONNECT_5_7 8.20
  openconnect_set_webview_callback@OPENCONNECT_5_7 8.20

@@ -1775,6 +1775,12 @@ void openconnect_set_stats_handler(struct openconnect_info *vpninfo,
 	vpninfo->stats_handler = stats_handler;
 }
 
+void openconnect_set_tunnel_handler(struct openconnect_info *vpninfo,
+				   openconnect_tunnel_vfn handler)
+{
+	vpninfo->tunnel_handler = handler;
+}
+
 /* Set up a traditional OS-based tunnel device, optionally specified in 'ifname'. */
 int openconnect_setup_tun_device(struct openconnect_info *vpninfo,
 				 const char *vpnc_script, const char *ifname)
