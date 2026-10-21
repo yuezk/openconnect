@@ -775,6 +775,11 @@ static void free_hip_environment(struct openconnect_info *vpninfo);
 
 void openconnect_vpninfo_free(struct openconnect_info *vpninfo)
 {
+#ifndef _WIN32
+	/* A caller may free after script setup without entering the main loop. */
+	if (vpninfo->script_tun > 0 && vpninfo->tun_fd >= 0)
+		os_shutdown_tun(vpninfo);
+#endif
 	free_hip_environment(vpninfo);
 	openconnect_close_https(vpninfo, 1);
 	if (vpninfo->proto && vpninfo->proto->udp_shutdown)

@@ -114,7 +114,7 @@ static int setup_tun_device(struct openconnect_info *vpninfo)
 			return 0;
 		/* A callback configuration failure must not retry device setup via
 		 * the legacy path or report the connection as successful. */
-		if (vpninfo->configure_tun)
+		if (vpninfo->configure_tun || vpninfo->script_tun)
 			return -EIO;
 	}
 
@@ -202,6 +202,19 @@ int openconnect_mainloop(struct openconnect_info *vpninfo,
 			timeout = INT_MAX;
 		else
 			timeout = 1000;
+
+#ifndef _WIN32
+		if (vpninfo->script_tun > 0) {
+			if (script_tun_exited(vpninfo)) {
+				vpninfo->quit_reason = "Tunnel script exited";
+				ret = -EPIPE;
+				break;
+			}
+			/* Datagram EOF is not a portable child-exit notification. */
+			if (timeout > 250)
+				timeout = 250;
+		}
+#endif
 
 		if (!tun_is_up(vpninfo)) {
 			if (vpninfo->delay_tunnel_reason) {

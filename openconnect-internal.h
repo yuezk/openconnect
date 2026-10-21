@@ -1304,6 +1304,7 @@ int vhost_tun_mainloop(struct openconnect_info *vpninfo, int *timeout, int reada
 
 /* tun.c / tun-win32.c */
 void os_shutdown_tun(struct openconnect_info *vpninfo);
+int script_tun_exited(struct openconnect_info *vpninfo);
 int os_read_tun(struct openconnect_info *vpninfo, struct pkt *pkt);
 int os_write_tun(struct openconnect_info *vpninfo, struct pkt *pkt);
 intptr_t os_setup_tun(struct openconnect_info *vpninfo);

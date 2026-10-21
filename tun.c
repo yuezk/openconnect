@@ -471,7 +471,8 @@ int openconnect_setup_tun_script(struct openconnect_info *vpninfo,
 	int fds[2];
 
 	STRDUP(vpninfo->vpnc_script, tun_script);
-	vpninfo->script_tun = 1;
+	/* Negative means script framing without an owned child yet. */
+	vpninfo->script_tun = -1;
 
 	prepare_script_env(vpninfo);
 	if (socketpair(AF_UNIX, SOCK_DGRAM, 0, fds)) {
@@ -481,6 +482,8 @@ int openconnect_setup_tun_script(struct openconnect_info *vpninfo,
 	pid = fork();
 	if (pid < 0) {
 		vpn_progress(vpninfo, PRG_ERR, _("fork failed: %s\n"), strerror(errno));
+		close(fds[0]);
+		close(fds[1]);
 		return -EIO;
 	} else if (pid == 0) {
 		/* Child */
@@ -491,13 +494,48 @@ int openconnect_setup_tun_script(struct openconnect_info *vpninfo,
 		apply_script_env(vpninfo->script_env);
 		execl("/bin/sh", "/bin/sh", "-c", vpninfo->vpnc_script, NULL);
 		perror(_("execl"));
-		exit(1);
+		_exit(1);
 	}
+	/* Close the fork/exit race before any process-group signal. */
+	setpgid(pid, pid);
 	close(fds[1]);
 	vpninfo->script_tun = pid;
 	vpninfo->ifname = strdup(_("(script)"));
 
 	return openconnect_setup_tun_fd(vpninfo, fds[0]);
+}
+
+/* Observe without reaping: retaining the child reserves its PID until shutdown
+ * has signalled the entire group. Never consume unrelated application children. */
+int script_tun_exited(struct openconnect_info *vpninfo)
+{
+	siginfo_t status;
+	int ret;
+	if (vpninfo->script_tun <= 0)
+		return 0;
+	memset(&status, 0, sizeof(status));
+	do {
+		ret = waitid(P_PID, vpninfo->script_tun, &status,
+			     WEXITED | WNOHANG | WNOWAIT);
+	} while (ret < 0 && errno == EINTR);
+	return ret == 0 && status.si_pid != 0;
+}
+
+static void shutdown_script_tun(struct openconnect_info *vpninfo)
+{
+	pid_t pid = vpninfo->script_tun;
+	int attempts, ret;
+	if (pid <= 0)
+		return;
+	kill(-pid, SIGTERM);
+	for (attempts = 0; attempts < 200 && !script_tun_exited(vpninfo); attempts++)
+		usleep(10000);
+	/* Also terminate descendants if the shell has already exited. */
+	kill(-pid, SIGKILL);
+	do {
+		ret = waitpid(pid, NULL, 0);
+	} while (ret < 0 && errno == EINTR);
+	vpninfo->script_tun = -1;
 }
 
 int os_read_tun(struct openconnect_info *vpninfo, struct pkt *pkt)
@@ -573,8 +611,7 @@ int os_write_tun(struct openconnect_info *vpninfo, struct pkt *pkt)
 void os_shutdown_tun(struct openconnect_info *vpninfo)
 {
 	if (vpninfo->script_tun) {
-		/* nuke the whole process group */
-		kill(-vpninfo->script_tun, SIGHUP);
+		shutdown_script_tun(vpninfo);
 	} else {
 		script_config_tun(vpninfo, "disconnect");
 #ifdef __sun__
