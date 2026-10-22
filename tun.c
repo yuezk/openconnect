@@ -16,6 +16,8 @@
  */
 
 #include <config.h>
+#include <grp.h>
+#include <poll.h>
 
 #include "openconnect-internal.h"
 
@@ -503,6 +505,110 @@ int openconnect_setup_tun_script(struct openconnect_info *vpninfo,
 	vpninfo->ifname = strdup(_("(script)"));
 
 	return openconnect_setup_tun_fd(vpninfo, fds[0]);
+}
+
+/* All allocation and environment preparation occurs before fork. */
+int openconnect_setup_tun_script_exec(struct openconnect_info *vpninfo,
+    const struct openconnect_script_tun_launch *launch)
+{
+    int packets[2] = {-1, -1}, errors[2] = {-1, -1};
+    int ret = -EINVAL, child_error = 0, root = geteuid() == 0;
+    pid_t pid;
+    long maxfd = sysconf(_SC_OPEN_MAX);
+    char packet_env[64], control_env[64];
+    char *env[] = { "PATH=/usr/bin:/bin", packet_env, control_env, NULL };
+    gid_t *native_groups = NULL;
+    size_t i;
+
+    vpninfo->script_tun = -1;
+    if (!launch || !launch->program || launch->program[0] != '/' ||
+        !launch->argv || !launch->argv[0] || !launch->uid || launch->control_fd < 3 ||
+        launch->group_count > 65536 || (launch->group_count && !launch->groups) || maxfd < 0)
+        return -EINVAL;
+    native_groups = malloc((launch->group_count + 1) * sizeof(gid_t));
+    if (!native_groups)
+        return -ENOMEM;
+    for (i = 0; i < launch->group_count; i++)
+        native_groups[i] = launch->groups[i];
+    if (!root) {
+        int count = getgroups(0, NULL);
+        gid_t *current = count >= 0 ? malloc((count + 1) * sizeof(gid_t)) : NULL;
+        int matches = getuid() == launch->uid && geteuid() == launch->uid &&
+            getgid() == launch->gid && getegid() == launch->gid && count == (int)launch->group_count;
+        if (!current || getgroups(count, current) != count)
+            matches = 0;
+        if (matches) {
+            for (i = 0; i < launch->group_count; i++) {
+                size_t j;
+                for (j = 0; j < launch->group_count && current[j] != native_groups[i]; j++);
+                if (j == launch->group_count) matches = 0;
+            }
+        }
+        free(current);
+        if (!matches) { ret = -EPERM; goto out; }
+    }
+#ifdef __APPLE__
+    if (socketpair(AF_UNIX, SOCK_DGRAM, 0, packets)) { ret = -errno; goto out; }
+    if (fcntl(packets[0], F_SETFD, FD_CLOEXEC) < 0 || fcntl(packets[1], F_SETFD, FD_CLOEXEC) < 0) { ret = -errno; goto out; }
+    if (pipe(errors)) { ret = -errno; goto out; }
+#else
+    if (socketpair(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0, packets)) { ret = -errno; goto out; }
+    if (pipe2(errors, O_CLOEXEC)) { ret = -errno; goto out; }
+#endif
+    if (fcntl(errors[0], F_SETFD, FD_CLOEXEC) < 0 || fcntl(errors[1], F_SETFD, FD_CLOEXEC) < 0) { ret = -errno; goto out; }
+    snprintf(packet_env, sizeof(packet_env), "VPNFD=%d", packets[1]);
+    snprintf(control_env, sizeof(control_env), "OPENCONNECT_SCRIPT_TUN_CONTROL_FD=%d", launch->control_fd);
+    pid = fork();
+    if (pid < 0) { ret = -errno; goto out; }
+    if (!pid) {
+        int fd;
+        close(errors[0]);
+        if (setpgid(0, 0) < 0) goto child_fail;
+        if (root && (setgroups(launch->group_count, native_groups) || setgid(launch->gid) || setuid(launch->uid)))
+            goto child_fail;
+        if (getuid() != launch->uid || geteuid() != launch->uid || getgid() != launch->gid || getegid() != launch->gid) {
+            errno = EPERM; goto child_fail;
+        }
+        if (root && setuid(0) == 0) { errno = EPERM; goto child_fail; }
+        for (fd = 3; fd < maxfd; fd++) {
+            if (fd != packets[1] && fd != launch->control_fd && fd != errors[1]) close(fd);
+        }
+        if (fcntl(packets[1], F_SETFD, 0) < 0 || fcntl(launch->control_fd, F_SETFD, 0) < 0)
+            goto child_fail;
+        execve(launch->program, (char *const *)launch->argv, env);
+child_fail:
+        child_error = errno;
+        (void)write(errors[1], &child_error, sizeof(child_error));
+        _exit(127);
+    }
+    setpgid(pid, pid);
+    vpninfo->script_tun = pid;
+    close(errors[1]); errors[1] = -1;
+    close(packets[1]); packets[1] = -1;
+    {
+        struct pollfd pfd = { .fd = errors[0], .events = POLLIN };
+        int result;
+        do { result = poll(&pfd, 1, 10000); } while (result < 0 && errno == EINTR);
+        if (result <= 0) { ret = result == 0 ? -ETIMEDOUT : -errno; goto failed_child; }
+        do { result = read(errors[0], &child_error, sizeof(child_error)); } while (result < 0 && errno == EINTR);
+        if (result != 0) { ret = result == sizeof(child_error) ? -child_error : -EIO; goto failed_child; }
+    }
+    vpninfo->ifname = strdup("(script)");
+    ret = openconnect_setup_tun_fd(vpninfo, packets[0]);
+    if (ret) { vpninfo->tun_fd = -1; goto failed_child; }
+    packets[0] = -1;
+    goto out;
+failed_child:
+    kill(-pid, SIGKILL);
+    while (waitpid(pid, NULL, 0) < 0 && errno == EINTR);
+    vpninfo->script_tun = -1;
+out:
+    free(native_groups);
+    if (packets[0] >= 0) close(packets[0]);
+    if (packets[1] >= 0) close(packets[1]);
+    if (errors[0] >= 0) close(errors[0]);
+    if (errors[1] >= 0) close(errors[1]);
+    return ret;
 }
 
 /* Observe without reaping: retaining the child reserves its PID until shutdown

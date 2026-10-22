@@ -761,6 +761,22 @@ int openconnect_setup_tun_device(struct openconnect_info *vpninfo,
 				 const char *vpnc_script, const char *ifname);
 
 /* Pass traffic to a script program (no tun device). */
+
+/* Borrowed launch data. All strings, argv and group storage must remain valid
+ * until setup returns. The control descriptor remains owned by the caller. */
+struct openconnect_script_tun_launch {
+	const char *program;
+	const char *const *argv;
+	unsigned int uid, gid;
+	const unsigned int *groups;
+	size_t group_count;
+	int control_fd;
+};
+
+/* Drop credentials and directly execute the supplied script-tun consumer. */
+int openconnect_setup_tun_script_exec(struct openconnect_info *vpninfo,
+				    const struct openconnect_script_tun_launch *launch);
+
 int openconnect_setup_tun_script(struct openconnect_info *vpninfo,
 				 const char *tun_script);
 
