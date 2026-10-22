@@ -111,7 +111,7 @@ static int _openconnect_gnutls_write(gnutls_session_t ses, int fd, struct openco
 				FD_SET(fd, &rd_set);
 
 			cmd_fd_set(vpninfo, &rd_set, &maxfd);
-			while (select(maxfd + 1, &rd_set, &wr_set, NULL, NULL) < 0) {
+			while (ssl_select(vpninfo, maxfd + 1, &rd_set, &wr_set, NULL, NULL) < 0) {
 				if (errno != EINTR) {
 					vpn_perror(vpninfo, _("Failed select() for TLS"));
 					return -EIO;
@@ -166,7 +166,7 @@ static int _openconnect_gnutls_read(gnutls_session_t ses, int fd, struct opencon
 				FD_SET(fd, &rd_set);
 
 			cmd_fd_set(vpninfo, &rd_set, &maxfd);
-			while ((ret = select(maxfd + 1, &rd_set, &wr_set, NULL, tv)) < 0) {
+			while ((ret = ssl_select(vpninfo, maxfd + 1, &rd_set, &wr_set, NULL, tv)) < 0) {
 				if (errno != EINTR) {
 					vpn_perror(vpninfo, _("Failed select() for TLS/DTLS"));
 					return -EIO;
@@ -264,7 +264,7 @@ static int openconnect_gnutls_gets(struct openconnect_info *vpninfo, char *buf, 
 				FD_SET(vpninfo->ssl_fd, &rd_set);
 
 			cmd_fd_set(vpninfo, &rd_set, &maxfd);
-			while (select(maxfd + 1, &rd_set, &wr_set, NULL, NULL) < 0) {
+			while (ssl_select(vpninfo, maxfd + 1, &rd_set, &wr_set, NULL, NULL) < 0) {
 				if (errno != EINTR) {
 					vpn_perror(vpninfo, _("Failed select() for TLS"));
 					return -EIO;
@@ -2513,9 +2513,12 @@ int cstp_handshake(struct openconnect_info *vpninfo, unsigned init)
 				FD_SET(ssl_sock, &rd_set);
 
 			cmd_fd_set(vpninfo, &rd_set, &maxfd);
-			while (select(maxfd + 1, &rd_set, &wr_set, NULL, NULL) < 0) {
+			while (ssl_select(vpninfo, maxfd + 1, &rd_set, &wr_set, NULL, NULL) < 0) {
 				if (errno != EINTR) {
 					vpn_perror(vpninfo, _("Failed select() for TLS"));
+					gnutls_deinit(vpninfo->https_sess);
+					vpninfo->https_sess = NULL;
+					closesocket(ssl_sock);
 					return -EIO;
 				}
 			}

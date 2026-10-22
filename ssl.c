@@ -66,6 +66,38 @@
 #endif
 #endif
 
+int ssl_select(struct openconnect_info *vpninfo, int nfds, fd_set *readfds,
+	       fd_set *writefds, fd_set *exceptfds, struct timeval *timeout)
+{
+	struct timespec now;
+	struct timeval remaining;
+	int64_t microseconds;
+	int ret;
+
+	if (!vpninfo->https_deadline.tv_sec && !vpninfo->https_deadline.tv_nsec)
+		return select(nfds, readfds, writefds, exceptfds, timeout);
+	if (clock_gettime(CLOCK_MONOTONIC, &now))
+		return -1;
+	microseconds = (int64_t)(vpninfo->https_deadline.tv_sec - now.tv_sec) * 1000000 +
+		(vpninfo->https_deadline.tv_nsec - now.tv_nsec) / 1000;
+	if (microseconds <= 0) {
+		errno = ETIMEDOUT;
+		return -1;
+	}
+	remaining.tv_sec = microseconds / 1000000;
+	remaining.tv_usec = microseconds % 1000000;
+	/* Preserve shorter caller timeouts, such as DTLS read polling. */
+	if (timeout && (timeout->tv_sec < remaining.tv_sec ||
+		(timeout->tv_sec == remaining.tv_sec && timeout->tv_usec < remaining.tv_usec)))
+		return select(nfds, readfds, writefds, exceptfds, timeout);
+	ret = select(nfds, readfds, writefds, exceptfds, &remaining);
+	if (!ret) {
+		errno = ETIMEDOUT;
+		return -1;
+	}
+	return ret;
+}
+
 static inline int connect_pending(void)
 {
 #ifdef _WIN32
@@ -114,7 +146,7 @@ static int cancellable_connect(struct openconnect_info *vpninfo, int sockfd,
 		FD_SET(sockfd, &ex_set);
 #endif
 		cmd_fd_set(vpninfo, &rd_set, &maxfd);
-		while (select(maxfd + 1, &rd_set, &wr_set, &ex_set, NULL) < 0) {
+		while (ssl_select(vpninfo, maxfd + 1, &rd_set, &wr_set, &ex_set, NULL) < 0) {
 			if (errno != EINTR) {
 				vpn_perror(vpninfo, _("Failed select() for socket connect"));
 				return -EIO;
@@ -187,7 +219,7 @@ int cancellable_accept(struct openconnect_info *vpninfo, int sockfd)
 		FD_SET(sockfd, &rd_set);
 
 		cmd_fd_set(vpninfo, &rd_set, &maxfd);
-		while (select(maxfd + 1, &rd_set, &wr_set, &ex_set, NULL) < 0) {
+		while (ssl_select(vpninfo, maxfd + 1, &rd_set, &wr_set, &ex_set, NULL) < 0) {
 			if (errno != EINTR) {
 				vpn_perror(vpninfo, _("Failed select() for socket accept"));
 				return -EIO;
@@ -1300,7 +1332,7 @@ int cancellable_send(struct openconnect_info *vpninfo, int fd,
 		FD_SET(fd, &wr_set);
 		cmd_fd_set(vpninfo, &rd_set, &maxfd);
 
-		while (select(maxfd + 1, &rd_set, &wr_set, NULL, NULL) < 0) {
+		while (ssl_select(vpninfo, maxfd + 1, &rd_set, &wr_set, NULL, NULL) < 0) {
 			if (errno != EINTR) {
 				vpn_perror(vpninfo, _("Failed select() for socket send"));
 				return -EIO;
@@ -1341,7 +1373,7 @@ int cancellable_recv(struct openconnect_info *vpninfo, int fd,
 		FD_SET(fd, &rd_set);
 		cmd_fd_set(vpninfo, &rd_set, &maxfd);
 
-		if (select(maxfd + 1, &rd_set, NULL, NULL, NULL) < 0) {
+		if (ssl_select(vpninfo, maxfd + 1, &rd_set, NULL, NULL, NULL) < 0) {
 			if (errno != EINTR) {
 				vpn_perror(vpninfo, _("Failed select() for socket recv"));
 				return -EIO;

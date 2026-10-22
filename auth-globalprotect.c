@@ -858,6 +858,13 @@ int gpst_bye(struct openconnect_info *vpninfo, const char *reason)
 	buf_append(request_body, "%s", vpninfo->cookie);
 	if ((result = buf_error(request_body)))
 		goto out;
+	/* Match the five-second logout budget used by the Rust session ledger.
+	 * A nonresponsive gateway must not prevent local tunnel cleanup. */
+	if (clock_gettime(CLOCK_MONOTONIC, &vpninfo->https_deadline)) {
+		result = -errno;
+		goto out;
+	}
+	vpninfo->https_deadline.tv_sec += 5;
 
 	/* We need to close and reopen the HTTPS connection (to kill
 	 * the tunnel session) and submit a new HTTPS request to
@@ -884,5 +891,6 @@ int gpst_bye(struct openconnect_info *vpninfo, const char *reason)
 out:
 	buf_free(request_body);
 	free(xml_buf);
+	memset(&vpninfo->https_deadline, 0, sizeof(vpninfo->https_deadline));
 	return result;
 }

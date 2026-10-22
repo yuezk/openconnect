@@ -116,6 +116,7 @@
 
 #include <unistd.h>
 #include <sys/time.h>
+#include <time.h>
 #include <sys/types.h>
 
 #include <stdint.h>
@@ -667,6 +668,7 @@ struct openconnect_info {
 	int disable_ipv6;
 	int reconnect_timeout;
 	int reconnect_interval;
+	struct timespec https_deadline; /* Monotonic deadline; zero outside bounded logout. */
 	int dtls_attempt_period;
 	int udp_probes_sent;
 	time_t auth_expiration;
@@ -1474,6 +1476,8 @@ int lzs_decompress(unsigned char *dst, int dstlen, const unsigned char *src, int
 int lzs_compress(unsigned char *dst, int dstlen, const unsigned char *src, int srclen);
 
 /* ssl.c */
+int ssl_select(struct openconnect_info *vpninfo, int nfds, fd_set *readfds,
+	       fd_set *writefds, fd_set *exceptfds, struct timeval *timeout);
 unsigned string_is_hostname(const char *str);
 int connect_https_socket(struct openconnect_info *vpninfo);
 int __attribute__ ((format(printf, 4, 5)))
