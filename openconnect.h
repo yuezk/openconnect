@@ -762,14 +762,12 @@ int openconnect_setup_tun_device(struct openconnect_info *vpninfo,
 
 /* Pass traffic to a script program (no tun device). */
 
-/* Borrowed launch data. All strings, argv and group storage must remain valid
+/* Borrowed launch data. All strings and argv storage must remain valid
  * until setup returns. The control descriptor remains owned by the caller. */
 struct openconnect_script_tun_launch {
 	const char *program;
 	const char *const *argv;
-	unsigned int uid, gid;
-	const unsigned int *groups;
-	size_t group_count;
+	unsigned int uid;
 	int control_fd;
 };
 

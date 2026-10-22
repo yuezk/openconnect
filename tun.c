@@ -17,6 +17,7 @@
 
 #include <config.h>
 #include <grp.h>
+#include <pwd.h>
 #include <poll.h>
 
 #include "openconnect-internal.h"
@@ -517,36 +518,26 @@ int openconnect_setup_tun_script_exec(struct openconnect_info *vpninfo,
     long maxfd = sysconf(_SC_OPEN_MAX);
     char packet_env[64], control_env[64];
     char *env[] = { "PATH=/usr/bin:/bin", packet_env, control_env, NULL };
-    gid_t *native_groups = NULL;
-    size_t i;
+    struct passwd pwd, *user;
+    char user_buffer[16384];
+    gid_t gid;
+    int error;
 
     vpninfo->script_tun = -1;
     if (!launch || !launch->program || launch->program[0] != '/' ||
         !launch->argv || !launch->argv[0] || !launch->uid || launch->control_fd < 3 ||
-        launch->group_count > 65536 || (launch->group_count && !launch->groups) || maxfd < 0)
+        maxfd < 0)
         return -EINVAL;
-    native_groups = malloc((launch->group_count + 1) * sizeof(gid_t));
-    if (!native_groups)
-        return -ENOMEM;
-    for (i = 0; i < launch->group_count; i++)
-        native_groups[i] = launch->groups[i];
-    if (!root) {
-        int count = getgroups(0, NULL);
-        gid_t *current = count >= 0 ? malloc((count + 1) * sizeof(gid_t)) : NULL;
-        int matches = getuid() == launch->uid && geteuid() == launch->uid &&
-            getgid() == launch->gid && getegid() == launch->gid && count == (int)launch->group_count;
-        if (!current || getgroups(count, current) != count)
-            matches = 0;
-        if (matches) {
-            for (i = 0; i < launch->group_count; i++) {
-                size_t j;
-                for (j = 0; j < launch->group_count && current[j] != native_groups[i]; j++);
-                if (j == launch->group_count) matches = 0;
-            }
-        }
-        free(current);
-        if (!matches) { ret = -EPERM; goto out; }
+    error = getpwuid_r(launch->uid, &pwd, user_buffer, sizeof(user_buffer), &user);
+    if (error || !user) {
+        vpn_progress(vpninfo, PRG_ERR, _("Failed to look up script-tun user %u: %s\n"),
+                     launch->uid, error ? strerror(error) : "User does not exist");
+        return error ? -error : -ENOENT;
     }
+    gid = pwd.pw_gid;
+    if (!root && (getuid() != launch->uid || geteuid() != launch->uid ||
+                  getgid() != gid || getegid() != gid))
+        return -EPERM;
 #ifdef __APPLE__
     if (socketpair(AF_UNIX, SOCK_DGRAM, 0, packets)) { ret = -errno; goto out; }
     if (fcntl(packets[0], F_SETFD, FD_CLOEXEC) < 0 || fcntl(packets[1], F_SETFD, FD_CLOEXEC) < 0) { ret = -errno; goto out; }
@@ -564,9 +555,9 @@ int openconnect_setup_tun_script_exec(struct openconnect_info *vpninfo,
         int fd;
         close(errors[0]);
         if (setpgid(0, 0) < 0) goto child_fail;
-        if (root && (setgroups(launch->group_count, native_groups) || setgid(launch->gid) || setuid(launch->uid)))
+        if (root && (setgid(gid) || setgroups(1, &gid) || setuid(launch->uid)))
             goto child_fail;
-        if (getuid() != launch->uid || geteuid() != launch->uid || getgid() != launch->gid || getegid() != launch->gid) {
+        if (getuid() != launch->uid || geteuid() != launch->uid || getgid() != gid || getegid() != gid) {
             errno = EPERM; goto child_fail;
         }
         if (root && setuid(0) == 0) { errno = EPERM; goto child_fail; }
@@ -603,7 +594,6 @@ failed_child:
     while (waitpid(pid, NULL, 0) < 0 && errno == EINTR);
     vpninfo->script_tun = -1;
 out:
-    free(native_groups);
     if (packets[0] >= 0) close(packets[0]);
     if (packets[1] >= 0) close(packets[1]);
     if (errors[0] >= 0) close(errors[0]);
