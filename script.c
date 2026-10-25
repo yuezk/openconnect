@@ -693,6 +693,9 @@ int script_config_tun(struct openconnect_info *vpninfo, const char *reason)
 	if (!vpninfo->vpnc_script || vpninfo->script_tun)
 		return 0;
 
+#if OC_IOS
+	return -EOPNOTSUPP;
+#else
 	pid = fork();
 	if (pid == 0) {
 		/* Child */
@@ -731,5 +734,6 @@ int script_config_tun(struct openconnect_info *vpninfo, const char *reason)
 		return -EIO;
 	}
 	return 0;
+#endif
 }
 #endif

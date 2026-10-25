@@ -72,6 +72,12 @@
 #define TUN_HAS_AF_PREFIX 1
 #endif
 
+#if OC_IOS
+intptr_t os_setup_tun(struct openconnect_info *vpninfo)
+{
+	return -EOPNOTSUPP;
+}
+#else
 #ifdef __sun__
 #include <stropts.h>
 #include <sys/sockio.h>
@@ -440,6 +446,7 @@ intptr_t os_setup_tun(struct openconnect_info *vpninfo)
 }
 #endif /* !IFF_TUN (i.e. BSD) */
 #endif /* !__sun__ */
+#endif /* !OC_IOS */
 
 int openconnect_setup_tun_fd(struct openconnect_info *vpninfo, int tun_fd)
 {
@@ -470,6 +477,9 @@ int openconnect_setup_tun_fd(struct openconnect_info *vpninfo, int tun_fd)
 int openconnect_setup_tun_script(struct openconnect_info *vpninfo,
 				 const char *tun_script)
 {
+#if OC_IOS
+	return -EOPNOTSUPP;
+#else
 	pid_t pid;
 	int fds[2];
 
@@ -506,12 +516,16 @@ int openconnect_setup_tun_script(struct openconnect_info *vpninfo,
 	vpninfo->ifname = strdup(_("(script)"));
 
 	return openconnect_setup_tun_fd(vpninfo, fds[0]);
+#endif
 }
 
 /* All allocation and environment preparation occurs before fork. */
 int openconnect_setup_tun_script_exec(struct openconnect_info *vpninfo,
     const struct openconnect_script_tun_launch *launch)
 {
+#if OC_IOS
+	return -EOPNOTSUPP;
+#else
     int packets[2] = {-1, -1}, errors[2] = {-1, -1};
     int ret = -EINVAL, child_error = 0, root = geteuid() == 0;
     pid_t pid;
@@ -599,6 +613,7 @@ out:
     if (errors[0] >= 0) close(errors[0]);
     if (errors[1] >= 0) close(errors[1]);
     return ret;
+#endif
 }
 
 /* Observe without reaping: retaining the child reserves its PID until shutdown

@@ -881,6 +881,34 @@ static int gpst_build_getconfig_request(struct openconnect_info *vpninfo,
 	append_opt(request_body, "os-version", openconnect_get_gp_os_version(vpninfo));
 	append_opt(request_body, "hmac-algo", "sha1,");
 	append_opt(request_body, "enc-algo", "aes-256-gcm,aes-128-gcm,aes-128-cbc,");
+	if (!strcmp(gpst_os_name(vpninfo), "iOS")) {
+		/* Mobile clients send explicit tunnel fields, not the login cookie's
+		 * desktop metadata. Keep the stored cookie intact for HIP/logout. */
+		struct sockaddr_storage local;
+		socklen_t length = sizeof(local);
+		char address[NI_MAXHOST];
+		const char *ipv4 = "", *ipv6 = "";
+
+		if (!getsockname(vpninfo->ssl_fd, (struct sockaddr *)&local, &length) &&
+		    !getnameinfo((struct sockaddr *)&local, length, address, sizeof(address), NULL, 0, NI_NUMERICHOST)) {
+			if (local.ss_family == AF_INET)
+				ipv4 = address;
+			else if (local.ss_family == AF_INET6)
+				ipv6 = address;
+		}
+		append_opt(request_body, "client-ip", ipv4);
+		append_opt(request_body, "client-ipv6", ipv6);
+		append_opt(request_body, "serialno", "");
+		append_opt(request_body, "joined-domain", "");
+		append_opt(request_body, "vpn-type", "App Level VPN");
+		filter_opts(request_body, vpninfo->cookie, "user,portal,authcookie", 1);
+		if (old_addr || old_addr6) {
+			append_opt(request_body, "preferred-ip", old_addr);
+			append_opt(request_body, "preferred-ipv6", old_addr6);
+		} else
+			filter_opts(request_body, vpninfo->cookie, "preferred-ip,preferred-ipv6", 1);
+		return buf_error(request_body);
+	}
 	append_opt(request_body, "clientgpversion", app_version);
 	if (openconnect_get_gp_host_id(vpninfo))
 		append_opt(request_body, "host-id", openconnect_get_gp_host_id(vpninfo));
@@ -1193,7 +1221,7 @@ out:
 	return result;
 }
 
-#if !defined(_WIN32) && !defined(__native_client__)
+#if !defined(_WIN32) && !defined(__native_client__) && !OC_IOS
 
 static int hip_cancel_pending(struct openconnect_info *vpninfo)
 {
@@ -1333,7 +1361,7 @@ abort_child:
 }
 #endif
 
-#if !defined(_WIN32) && !defined(__native_client__)
+#if !defined(_WIN32) && !defined(__native_client__) && !OC_IOS
 static void free_hip_child_environment(char **environment)
 {
 	char **entry = environment;
@@ -1377,7 +1405,7 @@ static int run_hip_script(struct openconnect_info *vpninfo,
 	const struct openconnect_gp_hip_request *request,
 	const struct openconnect_gp_hip_control *control, struct oc_text_buf *report_buf)
 {
-#if !defined(_WIN32) && !defined(__native_client__)
+#if !defined(_WIN32) && !defined(__native_client__) && !OC_IOS
 	int pipefd[2];
 	int ret;
 	pid_t child;
@@ -1385,7 +1413,7 @@ static int run_hip_script(struct openconnect_info *vpninfo,
 	char **environment;
 #endif
 
-#if defined(_WIN32) || defined(__native_client__)
+#if defined(_WIN32) || defined(__native_client__) || OC_IOS
 	vpn_progress(vpninfo, PRG_ERR,
 		     _("Error: Running the 'HIP Report' script on this platform is not yet implemented.\n"));
 	return -EPERM;
@@ -1542,7 +1570,7 @@ static int hip_invocation_check(void *data)
 	struct timespec now;
 	long long elapsed;
 	int ret;
-#if !defined(_WIN32) && !defined(__native_client__)
+#if !defined(_WIN32) && !defined(__native_client__) && !OC_IOS
 	if (hip_cancel_pending(invocation->vpninfo))
 		return -EINTR;
 #endif

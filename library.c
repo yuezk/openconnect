@@ -776,8 +776,8 @@ static void free_hip_environment(struct openconnect_info *vpninfo);
 void openconnect_vpninfo_free(struct openconnect_info *vpninfo)
 {
 #ifndef _WIN32
-	/* A caller may free after script setup without entering the main loop. */
-	if (vpninfo->script_tun > 0 && vpninfo->tun_fd >= 0)
+	/* Owned callback/script endpoints also need cleanup before mainloop starts. */
+	if (vpninfo->tun_fd >= 0 && (vpninfo->script_tun > 0 || vpninfo->configure_tun))
 		os_shutdown_tun(vpninfo);
 #endif
 	free_hip_environment(vpninfo);
@@ -1785,6 +1785,25 @@ void openconnect_set_tunnel_handler(struct openconnect_info *vpninfo,
 {
 	vpninfo->tunnel_handler = handler;
 }
+
+#ifndef _WIN32
+/* Consumes fd on all paths. Callback configuration avoids OS device creation. */
+int openconnect_setup_tun_fd_with_config(struct openconnect_info *vpninfo, int fd)
+{
+	int ret;
+	if (!vpninfo->configure_tun || vpninfo->tun_fd >= 0) {
+		close(fd);
+		return -EINVAL;
+	}
+	prepare_script_env(vpninfo);
+	ret = openconnect_setup_tun_fd(vpninfo, fd);
+	if (!ret)
+		ret = script_config_tun(vpninfo, "connect");
+	if (ret)
+		os_shutdown_tun(vpninfo);
+	return ret;
+}
+#endif
 
 /* Set up a traditional OS-based tunnel device, optionally specified in 'ifname'. */
 int openconnect_setup_tun_device(struct openconnect_info *vpninfo,

@@ -22,6 +22,13 @@
 
 #define __OPENCONNECT_PRIVATE__
 
+#ifdef __APPLE__
+#include <TargetConditionals.h>
+#define OC_IOS TARGET_OS_IPHONE
+#else
+#define OC_IOS 0
+#endif
+
 /*
  * We need to include <winsock2.h> or <winsock.h> before openconnect.h.
  * Indeed openconnect.h is specifically intended not to be self-sufficient,

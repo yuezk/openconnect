@@ -167,11 +167,11 @@ static int check_cookie_success(struct openconnect_info *vpninfo)
 	buf_free(buf);
 	return 0;
 }
-#ifdef _WIN32
+#if defined(_WIN32) || OC_IOS
 static int tncc_preauth(struct openconnect_info *vpninfo)
 {
 	vpn_progress(vpninfo, PRG_ERR,
-		     _("TNCC support not implemented yet on Windows\n"));
+		     _("TNCC helper execution is unavailable on this platform\n"));
 	return -EOPNOTSUPP;
 }
 #else

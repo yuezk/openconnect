@@ -1111,7 +1111,7 @@ static int fetch_config(struct openconnect_info *vpninfo)
 
 int set_csd_user(struct openconnect_info *vpninfo)
 {
-#if defined(_WIN32) || defined(__native_client__)
+#if defined(_WIN32) || defined(__native_client__) || OC_IOS
 	vpn_progress(vpninfo, PRG_ERR,
 		     _("Error: Running the 'Cisco Secure Desktop' trojan on this platform is not yet implemented.\n"));
 	return -EPERM;
@@ -1164,7 +1164,7 @@ int set_csd_user(struct openconnect_info *vpninfo)
 
 static int run_csd_script(struct openconnect_info *vpninfo, char *buf, int buflen)
 {
-#if defined(_WIN32) || defined(__native_client__)
+#if defined(_WIN32) || defined(__native_client__) || OC_IOS
 	vpn_progress(vpninfo, PRG_ERR,
 		     _("Error: Running the 'Cisco Secure Desktop' trojan on this platform is not yet implemented.\n"));
 	return -EPERM;

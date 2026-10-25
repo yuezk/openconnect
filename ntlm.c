@@ -144,6 +144,9 @@ static int ntlm_helper_spawn(struct openconnect_info *vpninfo, int proxy,
 			     struct http_auth_state *auth_state,
 			     struct oc_text_buf *buf)
 {
+#if OC_IOS
+	return -EOPNOTSUPP;
+#else
 	char *username;
 	int pipefd[2];
 	pid_t pid;
@@ -229,6 +232,7 @@ static int ntlm_helper_spawn(struct openconnect_info *vpninfo, int proxy,
 		   helperbuf + 3);
 	auth_state->ntlm_helper_fd = pipefd[1];
 	return 0;
+#endif
 }
 
 static int ntlm_helper_challenge(struct openconnect_info *vpninfo, int proxy,
