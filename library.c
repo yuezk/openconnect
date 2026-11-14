@@ -192,6 +192,7 @@ struct openconnect_info *openconnect_vpninfo_new(const char *useragent,
 #ifdef _WIN32
 	vpninfo->ifname_w = NULL;
 	vpninfo->tun_fh = INVALID_HANDLE_VALUE;
+	vpninfo->tun_idx = -1;
 #else
 	vpninfo->tun_fd = -1;
 #endif
@@ -775,7 +776,11 @@ static void free_hip_environment(struct openconnect_info *vpninfo);
 
 void openconnect_vpninfo_free(struct openconnect_info *vpninfo)
 {
-#ifndef _WIN32
+#ifdef _WIN32
+	/* Setup may fail before mainloop takes ownership of the endpoint. */
+	if (tun_is_up(vpninfo))
+		os_shutdown_tun(vpninfo);
+#else
 	/* Owned callback/script endpoints also need cleanup before mainloop starts. */
 	if (vpninfo->tun_fd >= 0 && (vpninfo->script_tun > 0 || vpninfo->configure_tun))
 		os_shutdown_tun(vpninfo);

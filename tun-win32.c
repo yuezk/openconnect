@@ -888,7 +888,10 @@ int os_read_tun(struct openconnect_info *vpninfo, struct pkt *pkt)
 
 		if (err == ERROR_IO_PENDING)
 			vpninfo->tun_rd_pending = 1;
-		else if (err == ERROR_OPERATION_ABORTED) {
+		else if (vpninfo->tun_is_pipe) {
+			vpninfo->quit_reason = "Packet consumer disconnected";
+			return -1;
+		} else if (err == ERROR_OPERATION_ABORTED) {
 			vpninfo->quit_reason = "TAP device aborted";
 			vpn_progress(vpninfo, PRG_ERR,
 				     _("TAP device aborted connectivity. Disconnecting.\n"));
@@ -907,6 +910,11 @@ int os_read_tun(struct openconnect_info *vpninfo, struct pkt *pkt)
 		DWORD err = GetLastError();
 
 		if (err != ERROR_IO_INCOMPLETE) {
+			if (vpninfo->tun_is_pipe) {
+				vpninfo->tun_rd_pending = 0;
+				vpninfo->quit_reason = "Packet consumer disconnected";
+				return -1;
+			}
 			char *errstr = openconnect__win32_strerror(err);
 			vpninfo->tun_rd_pending = 0;
 			vpn_progress(vpninfo, PRG_ERR,
@@ -947,13 +955,35 @@ int os_write_tun(struct openconnect_info *vpninfo, struct pkt *pkt)
 		   practice anyway. */
 		vpn_progress(vpninfo, PRG_TRACE,
 			     _("Waiting for tun write...\n"));
-		if (GetOverlappedResult(vpninfo->tun_fh, &vpninfo->tun_wr_overlap, &pkt_size, TRUE)) {
+		if (vpninfo->tun_is_pipe) {
+			/* A stopped consumer can fill the pipe. Keep command cancellation
+			 * responsive while retaining this packet/OVERLAPPED until completion. */
+			while (!GetOverlappedResult(vpninfo->tun_fh, &vpninfo->tun_wr_overlap,
+						   &pkt_size, FALSE)) {
+				err = GetLastError();
+				if (err != ERROR_IO_INCOMPLETE)
+					break;
+				WaitForSingleObject(vpninfo->tun_wr_overlap.hEvent, 50);
+				poll_cmd_fd(vpninfo, 0);
+				if (vpninfo->got_cancel_cmd || vpninfo->got_pause_cmd) {
+					CancelIoEx(vpninfo->tun_fh, &vpninfo->tun_wr_overlap);
+					GetOverlappedResult(vpninfo->tun_fh, &vpninfo->tun_wr_overlap,
+							    &pkt_size, TRUE);
+					return -1;
+				}
+			}
+			if (pkt_size == pkt->len)
+				return 0;
+			vpninfo->quit_reason = "Packet consumer disconnected";
+		} else if (GetOverlappedResult(vpninfo->tun_fh, &vpninfo->tun_wr_overlap, &pkt_size, TRUE)) {
 			vpn_progress(vpninfo, PRG_TRACE,
 				     _("Wrote %ld bytes to tun after waiting\n"), pkt_size);
 			return 0;
 		}
 		err = GetLastError();
 	}
+	if (vpninfo->tun_is_pipe)
+		vpninfo->quit_reason = "Packet consumer disconnected";
 	errstr = openconnect__win32_strerror(err);
 	vpn_progress(vpninfo, PRG_ERR,
 		     _("Failed to write to TAP device: %s\n"), errstr);
@@ -969,15 +999,54 @@ void os_shutdown_tun(struct openconnect_info *vpninfo)
 
 static void shutdown_tun(struct openconnect_info *vpninfo)
 {
+	vpninfo->tun_monitored = 0;
 	if (vpninfo->wintun) {
+		/* The read event belongs to the Wintun session, not to OpenConnect. */
 		os_shutdown_wintun(vpninfo);
-		return;
+	} else if (vpninfo->tun_fh != INVALID_HANDLE_VALUE) {
+		if (vpninfo->tun_rd_pending) {
+			DWORD bytes;
+			CancelIoEx(vpninfo->tun_fh, &vpninfo->tun_rd_overlap);
+			GetOverlappedResult(vpninfo->tun_fh, &vpninfo->tun_rd_overlap, &bytes, TRUE);
+		}
+		CloseHandle(vpninfo->tun_fh);
+		if (vpninfo->tun_rd_overlap.hEvent)
+			CloseHandle(vpninfo->tun_rd_overlap.hEvent);
+		if (vpninfo->tun_wr_overlap.hEvent)
+			CloseHandle(vpninfo->tun_wr_overlap.hEvent);
 	}
+	vpninfo->tun_fh = INVALID_HANDLE_VALUE;
+	vpninfo->tun_idx = -1;
+	vpninfo->tun_rd_pending = 0;
+	vpninfo->tun_is_pipe = 0;
+	memset(&vpninfo->tun_rd_overlap, 0, sizeof(vpninfo->tun_rd_overlap));
+	memset(&vpninfo->tun_wr_overlap, 0, sizeof(vpninfo->tun_wr_overlap));
+}
 
-	CloseHandle(vpninfo->tun_fh);
-	vpninfo->tun_fh = NULL;
-	CloseHandle(vpninfo->tun_rd_overlap.hEvent);
-	vpninfo->tun_rd_overlap.hEvent = NULL;
+int openconnect_setup_tun_pipe(struct openconnect_info *vpninfo, intptr_t handle)
+{
+	HANDLE pipe = INVALID_HANDLE_VALUE;
+	DWORD mode = PIPE_READMODE_MESSAGE;
+	if (tun_is_up(vpninfo) || !handle || (HANDLE)handle == INVALID_HANDLE_VALUE)
+		return -EINVAL;
+	if (!DuplicateHandle(GetCurrentProcess(), (HANDLE)handle, GetCurrentProcess(),
+			     &pipe, 0, FALSE, DUPLICATE_SAME_ACCESS))
+		return -EIO;
+	if (!SetNamedPipeHandleState(pipe, &mode, NULL, NULL)) {
+		CloseHandle(pipe);
+		return -EINVAL;
+	}
+	vpninfo->tun_fh = pipe;
+	vpninfo->tun_is_pipe = 1;
+	vpninfo->script_tun = 1;
+	vpninfo->tun_rd_overlap.hEvent = CreateEvent(NULL, FALSE, FALSE, NULL);
+	vpninfo->tun_wr_overlap.hEvent = CreateEvent(NULL, FALSE, FALSE, NULL);
+	if (!vpninfo->tun_rd_overlap.hEvent || !vpninfo->tun_wr_overlap.hEvent) {
+		shutdown_tun(vpninfo);
+		return -ENOMEM;
+	}
+	monitor_read_fd(vpninfo, tun);
+	return 0;
 }
 
 int openconnect_setup_tun_fd(struct openconnect_info *vpninfo, intptr_t tun_fd)

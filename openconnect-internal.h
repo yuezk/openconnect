@@ -779,7 +779,7 @@ struct openconnect_info {
 
 	HANDLE tun_fh;
 	OVERLAPPED tun_rd_overlap, tun_wr_overlap;
-	int tun_idx, tun_rd_pending;
+	int tun_idx, tun_rd_pending, tun_is_pipe;
 #else
 	int tun_fd;
 #endif

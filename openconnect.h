@@ -779,6 +779,9 @@ int openconnect_setup_tun_script(struct openconnect_info *vpninfo,
 				 const char *tun_script);
 
 #ifdef _WIN32
+/* Attach a connected message-mode packet pipe. Duplicates the caller's handle;
+ * it must support overlapped I/O and must not be associated with an IOCP. */
+int openconnect_setup_tun_pipe(struct openconnect_info *vpninfo, intptr_t handle);
 /* Caller will provide an overlap-capable handle for the tunnel traffic. */
 int openconnect_setup_tun_fd(struct openconnect_info *vpninfo, intptr_t tun_fd);
 #else
@@ -828,7 +831,10 @@ typedef int (*openconnect_write_new_config_vfn) (void *privdata, const char *buf
 typedef int (*openconnect_process_auth_form_vfn) (void *privdata,
 						 struct oc_auth_form *form);
 /* Logging output which the user *may* want to see. */
-typedef void __attribute__ ((format(printf, 3, 4)))
+typedef void
+#ifdef __GNUC__
+	__attribute__ ((format(printf, 3, 4)))
+#endif
 		(*openconnect_progress_vfn) (void *privdata, int level,
 					    const char *fmt, ...);
 struct openconnect_info *openconnect_vpninfo_new(const char *useragent,
