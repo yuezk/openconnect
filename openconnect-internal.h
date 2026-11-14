@@ -1193,6 +1193,7 @@ static inline int set_sock_nonblock(int fd)
 static inline int set_fd_cloexec(int fd)
 {
 #ifdef _WIN32
+	(void)fd;
 	return 0; /* Windows has O_INHERIT but... */
 #else
 	int ret = fcntl(fd, F_SETFD, fcntl(fd, F_GETFD) | FD_CLOEXEC);
@@ -1572,6 +1573,7 @@ static inline int esp_wire_hdr_len(const struct openconnect_info *vpninfo)
 
 static inline int esp_gcm_auth_len(const struct openconnect_info *vpninfo)
 {
+	(void)vpninfo;
 	return 0;
 }
 
@@ -1589,6 +1591,7 @@ static inline int esp_gcm_cipher_key_len(const struct openconnect_info *vpninfo)
 
 static inline int esp_gpst_gcm_omits_next_hdr(const struct openconnect_info *vpninfo)
 {
+	(void)vpninfo;
 	return 0;
 }
 

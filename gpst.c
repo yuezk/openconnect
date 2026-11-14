@@ -18,6 +18,7 @@
 #include <config.h>
 
 #include "openconnect-internal.h"
+#include <inttypes.h>
 
 #if HAVE_JSON
 #include "json.h"
@@ -701,7 +702,8 @@ static int gpst_parse_config_xml(struct openconnect_info *vpninfo, xmlNode *xml_
 					     gpst_esp_enc_name(vpninfo->esp_enc), vpninfo->esp_enc,
 					     gpst_esp_hmac_name(vpninfo->esp_hmac), vpninfo->esp_hmac,
 					     vpninfo->enc_key_len, vpninfo->hmac_key_len,
-					     vpninfo->esp_gcm_icv, ntohl(eo->spi), ntohl(ei->spi));
+					     vpninfo->esp_gcm_icv, (unsigned int)ntohl(eo->spi),
+					     (unsigned int)ntohl(ei->spi));
 				if (!(vpninfo->esp_enc > 0 && vpninfo->enc_key_len > 0 &&
 				      (esp_uses_gcm(vpninfo) ||
 				       (vpninfo->esp_hmac > 0 && vpninfo->hmac_key_len > 0))))
@@ -771,12 +773,12 @@ static int gpst_parse_config_xml(struct openconnect_info *vpninfo, xmlNode *xml_
 
 	if (vpninfo->gp_nlb.enabled) {
 		vpn_progress(vpninfo, PRG_INFO,
-			     _("NLB enabled: hs_key=%d bytes enc_hs_key=%s(%zu bytes b64) tunnel_opaque=%s(%zu bytes b64) vip=%s connected_gw=%s opaque_valid_for=%llds\n"),
+			     _("NLB enabled: hs_key=%d bytes enc_hs_key=%s(%" PRIu64 " bytes b64) tunnel_opaque=%s(%" PRIu64 " bytes b64) vip=%s connected_gw=%s opaque_valid_for=%llds\n"),
 			     vpninfo->gp_nlb.hs_key_len,
 			     vpninfo->gp_nlb.enc_hs_key ? "present" : "missing",
-			     vpninfo->gp_nlb.enc_hs_key ? strlen(vpninfo->gp_nlb.enc_hs_key) : 0,
+			     (uint64_t)(vpninfo->gp_nlb.enc_hs_key ? strlen(vpninfo->gp_nlb.enc_hs_key) : 0),
 			     vpninfo->gp_nlb.tunnel_opaque ? "present" : "missing",
-			     vpninfo->gp_nlb.tunnel_opaque ? strlen(vpninfo->gp_nlb.tunnel_opaque) : 0,
+			     (uint64_t)(vpninfo->gp_nlb.tunnel_opaque ? strlen(vpninfo->gp_nlb.tunnel_opaque) : 0),
 			     vpninfo->gp_nlb.tunnel_vip ?: "unknown",
 			     vpninfo->gp_nlb.connected_gw_ip ?: "unknown",
 			     (long long)(vpninfo->gp_nlb.opaque_valid_until ?
@@ -1642,7 +1644,7 @@ int openconnect_collect_gp_hip_report(struct openconnect_info *vpninfo,
 			break;
 		case -E2BIG:
 			vpn_progress(vpninfo, PRG_ERR,
-				     _("HIP report generation exceeded the %zu-byte output limit.\n"), capacity);
+				     _("HIP report generation exceeded the %" PRIu64 "-byte output limit.\n"), (uint64_t)capacity);
 			break;
 		case -ETIMEDOUT:
 			vpn_progress(vpninfo, PRG_ERR, _("HIP report generation timed out.\n"));
@@ -1663,7 +1665,7 @@ int openconnect_collect_gp_hip_report(struct openconnect_info *vpninfo,
 		return ret;
 	if (*written > capacity) {
 		vpn_progress(vpninfo, PRG_ERR,
-			     _("HIP report exceeds the %zu-byte output limit.\n"), capacity);
+			     _("HIP report exceeds the %" PRIu64 "-byte output limit.\n"), (uint64_t)capacity);
 		return -E2BIG;
 	}
 	if (!*written) {

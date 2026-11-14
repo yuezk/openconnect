@@ -460,7 +460,7 @@ int dumb_socketpair(OPENCONNECT_CMD_SOCKET socks[2], int make_overlapped)
                 case 3:
                     n = 0; /* Current directory */
                     break;
-                case 4:
+                default:
                     goto fallback;
                 }
 

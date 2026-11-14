@@ -23,6 +23,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <ctype.h>
+#include <inttypes.h>
 
 #include "openconnect-internal.h"
 #include "gpst_nlb.h"
@@ -119,11 +120,11 @@ int gpst_nlb_prepare(struct openconnect_info *vpninfo)
 	}
 
 	vpn_progress(vpninfo, PRG_DEBUG,
-		     _("NLB tunnel control ready: vip=%s connected_gw=%s hs_key=%d bytes enc_hs_key=%zu bytes tunnel_opaque=%zu bytes opaque_valid_for=%llds\n"),
+		     _("NLB tunnel control ready: vip=%s connected_gw=%s hs_key=%d bytes enc_hs_key=%" PRIu64 " bytes tunnel_opaque=%" PRIu64 " bytes opaque_valid_for=%llds\n"),
 		     nlb->tunnel_vip ?: "unknown",
 		     nlb->connected_gw_ip ?: "unknown",
-		     nlb->hs_key_len, strlen(nlb->enc_hs_key),
-		     strlen(nlb->tunnel_opaque),
+		     nlb->hs_key_len, (uint64_t)strlen(nlb->enc_hs_key),
+		     (uint64_t)strlen(nlb->tunnel_opaque),
 		     (long long)(nlb->opaque_valid_until ?
 				 nlb->opaque_valid_until - time(NULL) : 0));
 	return 0;
