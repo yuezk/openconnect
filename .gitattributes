@@ -1,3 +1,6 @@
+# Keep Autotools and source files portable across Windows and Unix.
+* text=auto eol=lf
+
 # images and icons
 *.ico -text
 *.png -text
