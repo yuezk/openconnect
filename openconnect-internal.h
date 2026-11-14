@@ -1847,7 +1847,7 @@ static inline int certinfo_is_secondary(struct cert_info *certinfo)
    are a *precise* match for the right-hand side. */
 static inline int strprefix_match(const char *str, int len, const char *match)
 {
-	return len == strlen(match) && !strncasecmp(str, match, len);
+	return (size_t)len == strlen(match) && !strncasecmp(str, match, len);
 }
 
 #define STRDUP(res, arg) \
