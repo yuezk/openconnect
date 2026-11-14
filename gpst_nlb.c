@@ -320,7 +320,7 @@ int gpst_nlb_send_tunnel_request(struct openconnect_info *vpninfo)
 	len = gp_nlb_build_tunnel_request(vpninfo, request, sizeof(request));
 	if (len < 0)
 		return len;
-	ret = send(vpninfo->dtls_fd, request, len, 0);
+	ret = send(vpninfo->dtls_fd, (const char *)request, len, 0);
 	if (ret != len)
 		return ret < 0 ? -errno : -EIO;
 

@@ -259,7 +259,7 @@ static struct oc_adapter_info * get_adapter_list(struct openconnect_info *vpninf
 	int adapter_type;
 	char buf[40];
 	wchar_t name[MAX_ADAPTER_NAME];
-	char keyname[strlen(CONNECTIONS_KEY) + sizeof(buf) + 1 + strlen("\\Connection")];
+	char keyname[sizeof(CONNECTIONS_KEY) + sizeof(buf) + sizeof("\\Connection") - 1];
 	int i = 0;
 	struct oc_adapter_info *first = NULL, *last = NULL;
 
@@ -787,7 +787,7 @@ static void clear_ifname_w(struct openconnect_info *vpninfo)
 
 intptr_t os_setup_tun(struct openconnect_info *vpninfo)
 {
-	intptr_t ret;
+	intptr_t ret = OPEN_TUN_HARDFAIL;
 	struct oc_adapter_info *list = NULL;
 
 	list = get_adapter_list(vpninfo);

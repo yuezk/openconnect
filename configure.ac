@@ -333,6 +333,8 @@ AC_LINK_IFELSE([AC_LANG_PROGRAM([#include <time.h>],[[
 if test "$have_win" = yes; then
    # Checking "properly" for __attribute__((dllimport,stdcall)) functions is non-trivial
    LIBS="$LIBS -lws2_32 -lshlwapi -lsecur32 -liphlpapi"
+   # MinGW time headers use winpthreads for the 64-bit clock entrypoint.
+   AC_SEARCH_LIBS([clock_gettime64], [winpthread])
    AC_MSG_CHECKING([For localtime_s])
    AC_LINK_IFELSE([AC_LANG_PROGRAM([#include <time.h>],[[
 	struct tm tm;
