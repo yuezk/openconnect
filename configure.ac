@@ -153,6 +153,13 @@ fi
 AM_CONDITIONAL(BUILD_NSIS, [ test "$build_nsis" = "yes" ])
 AM_CONDITIONAL(OPENCONNECT_WINTUN, [ test "${wintun_arch}" != "" ])
 
+AC_ARG_WITH([wintun-tunnel-type],
+	[AS_HELP_STRING([--with-wintun-tunnel-type=NAME],
+	  [Wintun adapter tunnel type (default: OpenConnect)])],
+	[], [with_wintun_tunnel_type="OpenConnect"])
+AC_DEFINE_UNQUOTED(WINTUN_TUNNEL_TYPE, L"${with_wintun_tunnel_type}",
+	[Wintun adapter tunnel type])
+
 AC_ARG_WITH([external-browser],
 	[AS_HELP_STRING([--with-external-browser],
 	  [command to use for spawning external web browser])])

@@ -47,7 +47,6 @@ static WINTUN_SEND_PACKET_FUNC *WintunSendPacket;
 
 static struct openconnect_info *logger_vpninfo;
 
-#define WINTUN_TUNNEL_TYPE L"OpenConnect"
 #define WINTUN_RING_CAPACITY 0x400000 /* 4 MiB */
 
 static void CALLBACK wintun_log_fn(WINTUN_LOGGER_LEVEL wlvl, DWORD64 wts, const WCHAR *wmsg)
