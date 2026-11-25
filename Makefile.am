@@ -23,6 +23,15 @@ bin_PROGRAMS :=
 sbin_SCRIPTS :=
 noinst_PROGRAMS :=
 
+if OPENCONNECT_ESP
+check_PROGRAMS = gp-esp-mtu
+TESTS = gp-esp-mtu
+gp_esp_mtu_SOURCES = tests/gp-esp-mtu.c
+gp_esp_mtu_CFLAGS = $(libopenconnect_la_CFLAGS)
+# Link the internal packet helpers without exporting them from libopenconnect.
+gp_esp_mtu_LDADD = $(libopenconnect_la_OBJECTS) $(libopenconnect_la_LIBADD)
+endif
+
 AM_CFLAGS = @WFLAGS@
 AM_CPPFLAGS = -DLOCALEDIR="\"$(localedir)\""
 

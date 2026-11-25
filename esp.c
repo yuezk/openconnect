@@ -31,6 +31,17 @@
 
 #define GPST_ESP_PROBE_BURST	3
 #define ESP_FOOTER_SIZE		2
+#define ESP_PAD_ALIGNMENT	16
+
+int esp_calculate_mtu(struct openconnect_info *vpninfo)
+{
+	/* GCM aligns the IV together with the payload and footer. */
+	int padded_iv_len = esp_uses_gcm(vpninfo) ? ESP_GCM_IV_LEN : 0;
+	int wire_overhead = esp_wire_hdr_len(vpninfo) + esp_trailer_len(vpninfo);
+
+	return calculate_mtu(vpninfo, 1, wire_overhead - padded_iv_len,
+			     ESP_FOOTER_SIZE + padded_iv_len, ESP_PAD_ALIGNMENT);
+}
 
 static void gpst_send_probe_burst(struct openconnect_info *vpninfo)
 {
@@ -138,7 +149,7 @@ int esp_setup(struct openconnect_info *vpninfo)
 
 int construct_esp_packet(struct openconnect_info *vpninfo, struct pkt *pkt, uint8_t next_hdr)
 {
-	const int blksize = 16;
+	const int blksize = ESP_PAD_ALIGNMENT;
 	int i, padlen, ret, crypt_len;
 
 	if (!next_hdr) {

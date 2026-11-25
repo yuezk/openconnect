@@ -355,9 +355,6 @@ out:
 	return result;
 }
 
-#define ESP_HEADER_SIZE (4 /* SPI */ + 4 /* sequence number */)
-#define ESP_FOOTER_SIZE (1 /* pad length */ + 1 /* next header */)
-
 #ifdef HAVE_ESP
 static int check_hmac_algo(struct openconnect_info *v, const char *s)
 {
@@ -969,16 +966,12 @@ static int gpst_get_config(struct openconnect_info *vpninfo)
 			no_esp_reason = _("ESP disabled");
 		else if (vpninfo->dtls_state == DTLS_NOSECRET)
 			no_esp_reason = _("No ESP keys received");
+		else
+			vpninfo->ip_info.mtu = esp_calculate_mtu(vpninfo);
 #else
 		no_esp_reason = _("ESP support not available in this build");
 #endif
-		if (!no_esp_reason)
-			vpninfo->ip_info.mtu = calculate_mtu(
-				vpninfo, 1,
-				ESP_HEADER_SIZE + esp_trailer_len(vpninfo) + esp_wire_iv_len(vpninfo),
-				esp_uses_gcm(vpninfo) ? 1 : ESP_FOOTER_SIZE,
-				esp_uses_gcm(vpninfo) ? 1 : 16);
-		else
+		if (no_esp_reason)
 			vpninfo->ip_info.mtu = calculate_mtu(vpninfo, 0, TLS_OVERHEAD, 0, 1);
 
 		vpn_progress(vpninfo, PRG_ERR,
